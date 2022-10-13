@@ -465,11 +465,39 @@ pub struct Game {
     show_names: bool,
     show_leaderboard: bool,
     follow: Option<Id>,
+    tas: Tas,
+    tas_replay: Option<f32>,
+}
+
+/// For performing Tool Assisted Speedruns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tas {
+    paused: bool,
+    time: f32,
+    time_scale: f32,
+    rewind_time: f32,
+    last_rewind: usize,
+    timeline: Vec<(f32, Guy)>,
+    save_states: Vec<(f32, Guy)>,
 }
 
 impl Drop for Game {
     fn drop(&mut self) {
         self.save_level();
+    }
+}
+
+impl Default for Tas {
+    fn default() -> Self {
+        Self {
+            paused: true,
+            time: 0.0,
+            time_scale: 1.0,
+            rewind_time: 0.0,
+            last_rewind: 0,
+            timeline: Vec::new(),
+            save_states: Vec::new(),
+        }
     }
 }
 
@@ -482,6 +510,32 @@ impl Game {
         client_id: Id,
         connection: Connection,
     ) -> Self {
+        let mut my_guy = None;
+        let tas: Tas = if !cfg!(target_arch = "wasm32") {
+            match std::fs::File::open("tas.json") {
+                Ok(file) => {
+                    let reader = std::io::BufReader::new(file);
+                    match serde_json::from_reader::<_, Tas>(reader) {
+                        Ok(tas) => {
+                            info!("Sucessfully loaded tas");
+                            my_guy = tas.timeline.last().map(|(_, state)| state.clone());
+                            tas
+                        }
+                        Err(err) => {
+                            error!("Failed to read TAS state: {err}");
+                            default()
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("Failed to open tas.json: {err}");
+                    default()
+                }
+            }
+        } else {
+            default()
+        };
+
         let mut result = Self {
             emotes: vec![],
             geng: geng.clone(),
@@ -545,18 +599,27 @@ impl Game {
             show_names: true,
             show_leaderboard: opt.postjam,
             follow: None,
+            tas,
+            tas_replay: None,
         };
         if !opt.editor {
             result.my_guy = Some(client_id);
-            result.guys.insert(Guy::new(
-                client_id,
-                if result.customization.postjam {
-                    result.levels.1.spawn_point
-                } else {
-                    result.levels.0.spawn_point
-                },
-                !result.customization.postjam,
-            ));
+            let my_guy = match my_guy {
+                Some(mut guy) => {
+                    guy.id = client_id;
+                    guy
+                }
+                None => Guy::new(
+                    client_id,
+                    if result.customization.postjam {
+                        result.levels.1.spawn_point
+                    } else {
+                        result.levels.0.spawn_point
+                    },
+                    !result.customization.postjam,
+                ),
+            };
+            result.guys.insert(my_guy);
         }
         result
     }
@@ -926,38 +989,64 @@ impl Game {
             Some(guy) => guy,
             None => return,
         };
-        let new_input = Input {
-            roll_direction: {
-                let mut direction = 0.0;
-                if CONTROLS_LEFT
+        if self.tas_replay.is_none() {
+            let new_input = Input {
+                roll_direction: {
+                    let mut direction = 0.0;
+                    if CONTROLS_LEFT
+                        .iter()
+                        .any(|&key| self.geng.window().is_key_pressed(key))
+                    {
+                        direction += 1.0;
+                    }
+                    if CONTROLS_RIGHT
+                        .iter()
+                        .any(|&key| self.geng.window().is_key_pressed(key))
+                    {
+                        direction -= 1.0;
+                    }
+                    direction
+                },
+                force_fart: CONTROLS_FORCE_FART
                     .iter()
-                    .any(|&key| self.geng.window().is_key_pressed(key))
-                {
-                    direction += 1.0;
-                }
-                if CONTROLS_RIGHT
-                    .iter()
-                    .any(|&key| self.geng.window().is_key_pressed(key))
-                {
-                    direction -= 1.0;
-                }
-                direction
-            },
-            force_fart: CONTROLS_FORCE_FART
-                .iter()
-                .any(|&key| self.geng.window().is_key_pressed(key)),
-        };
-        if my_guy.input != new_input {
-            my_guy.input = new_input;
+                    .any(|&key| self.geng.window().is_key_pressed(key)),
+            };
+            if my_guy.input != new_input {
+                my_guy.input = new_input;
+                self.connection
+                    .send(ClientMessage::Update(self.simulation_time, my_guy.clone()));
+            }
+        } else {
             self.connection
                 .send(ClientMessage::Update(self.simulation_time, my_guy.clone()));
         }
     }
 
-    pub fn update_guys(&mut self, delta_time: f32) {
+    pub fn update_guys(&mut self, mut delta_time: f32) {
         for guy in &mut self.guys {
             if (guy.pos - self.levels.0.finish_point).len() < 1.5 {
                 guy.finished = true;
+            }
+
+            if let Some(time) = self.tas_replay {
+                if Some(guy.id) == self.my_guy {
+                    if let Some((_, state)) = self
+                        .tas
+                        .timeline
+                        .iter()
+                        .skip_while(|(t, _)| *t < time)
+                        .next()
+                        .or(self.tas.timeline.last())
+                    {
+                        let colors = guy.colors.clone();
+                        let name = guy.name.clone();
+                        let id = guy.id;
+                        *guy = state.clone();
+                        guy.id = id;
+                        guy.colors = colors;
+                        guy.name = name;
+                    }
+                }
             }
 
             if guy.finished {
@@ -970,6 +1059,20 @@ impl Game {
                         .rotate(delta_time)
                         * 1.0;
                 continue;
+            }
+
+            if self.tas_replay.is_none() && Some(guy.id) == self.my_guy {
+                self.tas.rewind_time = self.tas.time;
+                if self.tas.paused {
+                    continue;
+                }
+                if self.tas.last_rewind + 1 < self.tas.timeline.len() {
+                    self.tas.timeline.drain(self.tas.last_rewind + 1..);
+                }
+                self.tas.timeline.push((self.tas.time, guy.clone()));
+                self.tas.last_rewind = self.tas.timeline.len();
+                delta_time *= self.tas.time_scale;
+                self.tas.time += delta_time;
             }
 
             guy.w += (guy.input.roll_direction.clamp(-1.0, 1.0)
@@ -1569,6 +1672,79 @@ impl Game {
             );
         }
     }
+
+    fn handle_event_cheats(&mut self, event: &geng::Event) {
+        let window = self.geng.window();
+        match event {
+            geng::Event::Wheel { delta } => {
+                let delta = *delta as f32 * 0.002;
+                self.tas.time_scale = (self.tas.time_scale + delta).clamp(0.0, 2.0);
+            }
+            geng::Event::KeyDown { key } => match key {
+                geng::Key::R if window.is_key_pressed(geng::Key::LShift) => match self.tas_replay {
+                    Some(_) => self.tas_replay = None,
+                    None => self.tas_replay = Some(0.0),
+                },
+                geng::Key::P => {
+                    self.tas.paused = !self.tas.paused;
+                }
+                geng::Key::G => {
+                    if let Some(guy) = self.my_guy.and_then(|id| self.guys.get(&id)) {
+                        self.tas.save_states.push((self.tas.time, guy.clone()));
+                    }
+                }
+                geng::Key::T => {
+                    if let Some((time, state)) = self.tas.save_states.last() {
+                        if let Some(guy) = self.my_guy.and_then(|id| self.guys.get_mut(&id)) {
+                            self.tas.time = *time;
+                            let colors = guy.colors.clone();
+                            let name = guy.name.clone();
+                            let id = guy.id;
+                            *guy = state.clone();
+                            guy.id = id;
+                            guy.colors = colors;
+                            guy.name = name;
+                        }
+                    }
+                }
+                geng::Key::N => {
+                    self.tas.time_scale = (self.tas.time_scale - 0.1).clamp(0.0, 2.0);
+                }
+                geng::Key::M => {
+                    self.tas.time_scale = (self.tas.time_scale + 0.1).clamp(0.0, 2.0);
+                }
+                geng::Key::Num1 => self.tas.time_scale = 0.1,
+                geng::Key::Num2 => self.tas.time_scale = 0.2,
+                geng::Key::Num3 => self.tas.time_scale = 0.3,
+                geng::Key::Num4 => self.tas.time_scale = 0.4,
+                geng::Key::Num5 => self.tas.time_scale = 0.5,
+                geng::Key::Num6 => self.tas.time_scale = 0.6,
+                geng::Key::Num7 => self.tas.time_scale = 0.7,
+                geng::Key::Num8 => self.tas.time_scale = 0.8,
+                geng::Key::Num9 => self.tas.time_scale = 0.9,
+                geng::Key::Num0 => self.tas.time_scale = 1.0,
+                geng::Key::S if window.is_key_pressed(geng::Key::LCtrl) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        match std::fs::File::create("tas.json") {
+                            Ok(file) => {
+                                let writer = std::io::BufWriter::new(file);
+                                if let Err(err) = serde_json::to_writer(writer, &self.tas) {
+                                    error!("Failed to save TAS state: {err}");
+                                }
+                                info!("Sucessfully saved tas");
+                            }
+                            Err(err) => {
+                                error!("Failed to open tas.json: {err}");
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
 }
 
 impl geng::State for Game {
@@ -1699,6 +1875,53 @@ impl geng::State for Game {
                         Rgba::BLACK,
                     ),
                 );
+
+                let text = format!("Time scale: {:.2} ", self.tas.time_scale);
+                self.assets.font.draw(
+                    framebuffer,
+                    &camera,
+                    &text,
+                    vec2(0.0, 4.3),
+                    geng::TextAlign::CENTER,
+                    0.5,
+                    Rgba::BLACK,
+                );
+                if self.tas.paused {
+                    let text = "Paused";
+                    self.assets.font.draw(
+                        framebuffer,
+                        &camera,
+                        &text,
+                        vec2(0.0, 3.3),
+                        geng::TextAlign::CENTER,
+                        0.5,
+                        Rgba::BLACK,
+                    );
+                }
+                let mut time_text = String::from("TAS: ");
+                let millis = (self.tas.time * 1000.0).round() as i32;
+                let seconds = millis / 1000;
+                let millis = millis % 1000;
+                let minutes = seconds / 60;
+                let seconds = seconds % 60;
+                let hours = minutes / 60;
+                let minutes = minutes % 60;
+                if hours != 0 {
+                    time_text += &format!("{}h ", hours);
+                }
+                if minutes != 0 {
+                    time_text += &format!("{}m ", minutes);
+                }
+                time_text += &format!("{}s {:03}ms", seconds, millis);
+                self.assets.font.draw(
+                    framebuffer,
+                    &camera,
+                    &time_text,
+                    vec2(-8.0, 4.3),
+                    geng::TextAlign::LEFT,
+                    0.5,
+                    Rgba::BLACK,
+                );
             }
         }
     }
@@ -1711,6 +1934,44 @@ impl geng::State for Game {
         for time in self.remote_simulation_times.values_mut() {
             *time += delta_time;
         }
+
+        if let Some(time) = &mut self.tas_replay {
+            *time += delta_time;
+        } else if self.geng.window().is_key_pressed(geng::Key::K) {
+            if let Some(guy) = self.my_guy.and_then(|id| self.guys.get_mut(&id)) {
+                self.tas.rewind_time -= delta_time * self.tas.time_scale;
+                while self.tas.time > self.tas.rewind_time {
+                    let rewind = match self.tas.last_rewind.checked_sub(1) {
+                        Some(x) => x,
+                        None => break,
+                    };
+                    if let Some((time, state)) = self.tas.timeline.get(rewind) {
+                        self.tas.last_rewind = rewind;
+                        self.tas.time = *time;
+                        *guy = state.clone();
+                    } else {
+                        break;
+                    }
+                }
+                return;
+            }
+        } else if self.geng.window().is_key_pressed(geng::Key::L) {
+            if let Some(guy) = self.my_guy.and_then(|id| self.guys.get_mut(&id)) {
+                self.tas.rewind_time += delta_time * self.tas.time_scale;
+                while self.tas.time < self.tas.rewind_time {
+                    let rewind = self.tas.last_rewind + 1;
+                    if let Some((time, state)) = self.tas.timeline.get(rewind) {
+                        self.tas.last_rewind = rewind;
+                        self.tas.time = *time;
+                        *guy = state.clone();
+                    } else {
+                        break;
+                    }
+                }
+                return;
+            }
+        }
+
         self.update_my_guy_input();
         self.update_guys(delta_time);
         self.update_farticles(delta_time);
@@ -1777,6 +2038,8 @@ impl geng::State for Game {
     fn handle_event(&mut self, event: geng::Event) {
         self.handle_event_editor(&event);
         self.handle_customizer_event(&event);
+        self.handle_event_cheats(&event);
+
         match event {
             geng::Event::MouseMove { position, .. }
                 if self
@@ -1850,6 +2113,7 @@ impl geng::State for Game {
                         self.guys.insert(new_guy);
                         self.simulation_time = 0.0;
                         self.connection.send(ClientMessage::Despawn);
+                        self.tas = default();
                     }
                 }
             }
