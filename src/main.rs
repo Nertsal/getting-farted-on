@@ -1,3 +1,5 @@
+// TODO: custom fart texture/color/sound
+
 // TODO: write the rest of this comment
 use geng::prelude::*;
 
@@ -11,6 +13,7 @@ type Connection = geng::net::client::Connection<ServerMessage, ClientMessage>;
 enum UiMessage {
     Play,
     RandomizeSkin,
+    TogglePostJam,
 }
 
 use noise::NoiseFn;
@@ -53,6 +56,7 @@ pub struct Config {
     auto_fart_interval: f32,
     force_fart_interval: f32,
     fart_color: Rgba<f32>,
+    bubble_fart_color: Rgba<f32>,
     farticle_w: f32,
     farticle_size: f32,
     farticle_count: usize,
@@ -88,18 +92,35 @@ impl geng::LoadAsset for Texture {
     const DEFAULT_EXT: Option<&'static str> = Some("png");
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct SurfaceParams {
+    #[serde(default)]
+    pub non_collidable: bool,
     pub bounciness: f32,
     pub friction: f32,
     pub front: bool,
     pub back: bool,
+    pub sound: bool,
 }
 
 #[derive(Deserialize)]
 pub struct BackgroundParams {
     #[serde(default)]
+    pub background: bool,
+    #[serde(default)]
+    pub friction_along_flow: f32,
+    #[serde(default)]
     pub friction: f32,
+    #[serde(default)]
+    pub texture_movement_frequency: f32,
+    #[serde(default)]
+    pub texture_movement_amplitude: f32,
+    #[serde(default = "zero_vec")]
+    pub additional_force: Vec2<f32>,
+}
+
+fn zero_vec() -> Vec2<f32> {
+    Vec2::ZERO
 }
 
 pub struct SurfaceAssets {
@@ -107,6 +128,38 @@ pub struct SurfaceAssets {
     pub params: SurfaceParams,
     pub front_texture: Option<Texture>,
     pub back_texture: Option<Texture>,
+    pub sound: Option<geng::Sound>,
+}
+
+#[derive(geng::Assets)]
+pub struct CustomGuyAssets {
+    pub body: Texture,
+    pub eyes: Texture,
+    pub cheeks: Texture,
+}
+
+fn load_custom_guy_assets(
+    geng: &Geng,
+    path: &std::path::Path,
+) -> geng::AssetFuture<HashMap<String, CustomGuyAssets>> {
+    let geng = geng.clone();
+    let path = path.to_owned();
+    async move {
+        let json = <String as geng::LoadAsset>::load(&geng, &path.join("_list.json")).await?;
+        let list: Vec<String> = serde_json::from_str(&json).unwrap();
+        future::join_all(list.into_iter().map(|name| {
+            let geng = geng.clone();
+            let path = path.clone();
+            async move {
+                let assets = geng::LoadAsset::load(&geng, &path.join(&name)).await?;
+                Ok((name.to_uppercase(), assets))
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<_, anyhow::Error>>()
+    }
+    .boxed_local()
 }
 
 #[derive(geng::Assets)]
@@ -117,6 +170,34 @@ pub struct GuyAssets {
     pub clothes_top: Texture,
     pub clothes_bottom: Texture,
     pub hair: Texture,
+    #[asset(load_with = "load_custom_guy_assets(&geng, &base_path.join(\"custom\"))")]
+    pub custom: HashMap<String, CustomGuyAssets>,
+}
+
+fn load_objects_assets(
+    geng: &Geng,
+    path: &std::path::Path,
+) -> geng::AssetFuture<HashMap<String, Texture>> {
+    let geng = geng.clone();
+    let path = path.to_owned();
+    async move {
+        let json = <String as geng::LoadAsset>::load(&geng, &path.join("_list.json")).await?;
+        let list: Vec<String> = serde_json::from_str(&json).unwrap();
+        future::join_all(list.into_iter().map(|name| {
+            let geng = geng.clone();
+            let path = path.clone();
+            async move {
+                Ok((
+                    name.clone(),
+                    geng::LoadAsset::load(&geng, &path.join(format!("{}.png", name))).await?,
+                ))
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<_, anyhow::Error>>()
+    }
+    .boxed_local()
 }
 
 fn load_surface_assets(
@@ -143,13 +224,18 @@ fn load_surface_assets(
                         Ok::<_, anyhow::Error>(texture)
                     }
                 };
-                let mut back_texture = if params.back {
+                let back_texture = if params.back {
                     Some(load(format!("{}_back.png", name)).await?)
                 } else {
                     None
                 };
-                let mut front_texture = if params.front {
+                let front_texture = if params.front {
                     Some(load(format!("{}_front.png", name)).await?)
+                } else {
+                    None
+                };
+                let sound = if params.sound {
+                    Some(geng::LoadAsset::load(&geng, &path.join(format!("{}.wav", name))).await?)
                 } else {
                     None
                 };
@@ -160,6 +246,7 @@ fn load_surface_assets(
                         params,
                         front_texture,
                         back_texture,
+                        sound,
                     },
                 ))
             }
@@ -216,7 +303,12 @@ fn load_background_assets(
 pub struct SfxAssets {
     #[asset(range = "1..=3", path = "fart/*.wav")]
     pub fart: Vec<geng::Sound>,
+    #[asset(range = "1..=1", path = "bubble_fart/*.wav")]
+    pub bubble_fart: Vec<geng::Sound>,
+    #[asset(range = "1..=1", path = "rainbow_fart/*.wav")]
+    pub rainbow_fart: Vec<geng::Sound>,
     pub fart_recharge: geng::Sound,
+    pub water_splash: geng::Sound,
     #[asset(path = "music.mp3")]
     pub old_music: geng::Sound,
     #[asset(path = "KuviFart.wav")]
@@ -249,6 +341,8 @@ pub struct Assets {
     pub surfaces: HashMap<String, SurfaceAssets>,
     #[asset(load_with = "load_background_assets(&geng, &base_path.join(\"background\"))")]
     pub background: HashMap<String, BackgroundAssets>,
+    #[asset(load_with = "load_objects_assets(&geng, &base_path.join(\"objects\"))")]
+    pub objects: HashMap<String, Texture>,
     pub farticle: Texture,
     #[asset(load_with = "load_font(&geng, &base_path.join(\"Ludum-Dairy-0.2.0.ttf\"))")]
     pub font: geng::Font,
@@ -304,12 +398,19 @@ impl Surface {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Object {
+    pub type_name: String,
+    pub pos: Vec2<f32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Level {
     pub spawn_point: Vec2<f32>,
     pub finish_point: Vec2<f32>,
     pub surfaces: Vec<Surface>,
     pub background_tiles: Vec<BackgroundTile>,
     pub expected_path: Vec<Vec2<f32>>,
+    pub objects: Vec<Object>,
 }
 
 impl Level {
@@ -320,6 +421,7 @@ impl Level {
             surfaces: vec![],
             background_tiles: vec![],
             expected_path: vec![],
+            objects: vec![],
         }
     }
 }
@@ -343,6 +445,7 @@ pub struct GuyColors {
 #[derive(Serialize, Deserialize, Clone, Debug, HasId)]
 pub struct Guy {
     pub name: String,
+    pub colliding_water: bool,
     pub id: Id,
     pub pos: Vec2<f32>,
     pub vel: Vec2<f32>,
@@ -357,6 +460,7 @@ pub struct Guy {
     pub progress: f32,
     pub best_progress: f32,
     pub best_time: Option<f32>,
+    pub touched_a_unicorn: bool,
 }
 
 impl Guy {
@@ -366,6 +470,7 @@ impl Guy {
             Hsva::new(hue, 1.0, 1.0, 1.0).into()
         };
         Self {
+            colliding_water: false,
             name: "".to_owned(),
             id,
             pos: pos
@@ -398,6 +503,7 @@ impl Guy {
             progress: 0.0,
             best_progress: 0.0,
             best_time: None,
+            touched_a_unicorn: false,
         }
     }
 }
@@ -409,6 +515,7 @@ struct EditorState {
     selected_surface: String,
     selected_background: String,
     wind_drag: Option<(usize, Vec2<f32>)>,
+    selected_object: String,
 }
 
 impl EditorState {
@@ -419,12 +526,14 @@ impl EditorState {
             face_points: vec![],
             selected_surface: "".to_owned(),
             selected_background: "".to_owned(),
+            selected_object: "".to_owned(),
             wind_drag: None,
         }
     }
 }
 
 pub struct Farticle {
+    pub size: f32,
     pub pos: Vec2<f32>,
     pub vel: Vec2<f32>,
     pub color: Rgba<f32>,
@@ -434,6 +543,7 @@ pub struct Farticle {
 }
 
 pub struct Game {
+    best_time: Option<f32>,
     emotes: Vec<(f32, Id, usize)>,
     best_progress: f32,
     framebuffer_size: Vec2<f32>,
@@ -537,6 +647,7 @@ impl Game {
         };
 
         let mut result = Self {
+            best_time: None,
             emotes: vec![],
             geng: geng.clone(),
             config: assets.config.clone(),
@@ -584,6 +695,13 @@ impl Game {
                     0.0,
                     UiMessage::RandomizeSkin,
                 ),
+                ui::Button::new(
+                    &format!("postjam ({})", if opt.postjam { "on" } else { "off" }),
+                    vec2(0.0, -4.0),
+                    0.7,
+                    0.5,
+                    UiMessage::TogglePostJam,
+                ),
             ],
             show_customizer: !opt.editor,
             old_music: {
@@ -597,7 +715,7 @@ impl Game {
                 effect
             },
             show_names: true,
-            show_leaderboard: opt.postjam,
+            show_leaderboard: true,
             follow: None,
             tas,
             tas_replay: None,
@@ -616,7 +734,7 @@ impl Game {
                     } else {
                         result.levels.0.spawn_point
                     },
-                    !result.customization.postjam,
+                    true,
                 ),
             };
             result.guys.insert(my_guy);
@@ -654,46 +772,68 @@ impl Game {
             self.guys.iter().filter(|guy| guy.id != self.client_id),
             self.guys.iter().filter(|guy| guy.id == self.client_id),
         ] {
-            self.geng.draw_2d(
-                framebuffer,
-                &self.camera,
-                &draw_2d::TexturedQuad::unit_colored(
-                    &self.assets.guy.clothes_bottom,
-                    guy.colors.bottom,
+            let (eyes, cheeks, cheeks_color) = if let Some(custom) =
+                self.assets.guy.custom.get(&guy.name)
+            {
+                self.geng.draw_2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw_2d::TexturedQuad::unit(&custom.body)
+                        .scale_uniform(self.config.guy_radius)
+                        .transform(Mat3::rotate(guy.rot))
+                        .translate(guy.pos),
+                );
+                (&custom.eyes, &custom.cheeks, Rgba::WHITE)
+            } else {
+                self.geng.draw_2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw_2d::TexturedQuad::unit_colored(
+                        &self.assets.guy.clothes_bottom,
+                        guy.colors.bottom,
+                    )
+                    .scale_uniform(self.config.guy_radius)
+                    .transform(Mat3::rotate(guy.rot))
+                    .translate(guy.pos),
+                );
+                self.geng.draw_2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw_2d::TexturedQuad::unit_colored(
+                        &self.assets.guy.clothes_top,
+                        guy.colors.top,
+                    )
+                    .scale_uniform(self.config.guy_radius)
+                    .transform(Mat3::rotate(guy.rot))
+                    .translate(guy.pos),
+                );
+                self.geng.draw_2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw_2d::TexturedQuad::unit_colored(&self.assets.guy.hair, guy.colors.hair)
+                        .scale_uniform(self.config.guy_radius)
+                        .transform(Mat3::rotate(guy.rot))
+                        .translate(guy.pos),
+                );
+                self.geng.draw_2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw_2d::TexturedQuad::unit_colored(&self.assets.guy.skin, guy.colors.skin)
+                        .scale_uniform(self.config.guy_radius)
+                        .transform(Mat3::rotate(guy.rot))
+                        .translate(guy.pos),
+                );
+                (
+                    &self.assets.guy.eyes,
+                    &self.assets.guy.cheeks,
+                    guy.colors.skin,
                 )
-                .scale_uniform(self.config.guy_radius)
-                .transform(Mat3::rotate(guy.rot))
-                .translate(guy.pos),
-            );
-            self.geng.draw_2d(
-                framebuffer,
-                &self.camera,
-                &draw_2d::TexturedQuad::unit_colored(&self.assets.guy.clothes_top, guy.colors.top)
-                    .scale_uniform(self.config.guy_radius)
-                    .transform(Mat3::rotate(guy.rot))
-                    .translate(guy.pos),
-            );
-            self.geng.draw_2d(
-                framebuffer,
-                &self.camera,
-                &draw_2d::TexturedQuad::unit_colored(&self.assets.guy.hair, guy.colors.hair)
-                    .scale_uniform(self.config.guy_radius)
-                    .transform(Mat3::rotate(guy.rot))
-                    .translate(guy.pos),
-            );
-            self.geng.draw_2d(
-                framebuffer,
-                &self.camera,
-                &draw_2d::TexturedQuad::unit_colored(&self.assets.guy.skin, guy.colors.skin)
-                    .scale_uniform(self.config.guy_radius)
-                    .transform(Mat3::rotate(guy.rot))
-                    .translate(guy.pos),
-            );
+            };
             let autofart_progress = guy.auto_fart_timer / self.config.auto_fart_interval;
             self.geng.draw_2d(
                 framebuffer,
                 &self.camera,
-                &draw_2d::TexturedQuad::unit_colored(&self.assets.guy.eyes, {
+                &draw_2d::TexturedQuad::unit_colored(eyes, {
                     let k = 0.8;
                     let t = ((autofart_progress - k) / (1.0 - k)).clamp(0.0, 1.0) * 0.5;
                     Rgba::new(1.0, 1.0 - t, 1.0 - t, 1.0)
@@ -707,10 +847,10 @@ impl Game {
                 framebuffer,
                 &self.camera,
                 &draw_2d::TexturedQuad::unit_colored(
-                    &self.assets.guy.cheeks,
+                    cheeks,
                     Rgba {
                         a: (0.5 + 1.0 * autofart_progress).min(1.0),
-                        ..guy.colors.skin
+                        ..cheeks_color
                     },
                 )
                 .translate(vec2(self.noise(10.0), self.noise(10.0)) * 0.1 * autofart_progress)
@@ -718,9 +858,7 @@ impl Game {
                 .transform(Mat3::rotate(guy.rot))
                 .translate(guy.pos),
             );
-            if Some(guy.id) == self.my_guy
-                || (self.show_names && (!self.customization.postjam || guy.postjam))
-            {
+            if Some(guy.id) == self.my_guy || self.show_names {
                 self.assets.font.draw(
                     framebuffer,
                     &self.camera,
@@ -728,7 +866,11 @@ impl Game {
                     guy.pos + vec2(0.0, self.config.guy_radius * 1.1),
                     geng::TextAlign::CENTER,
                     0.1,
-                    Rgba::BLACK,
+                    if guy.postjam {
+                        Rgba::BLACK
+                    } else {
+                        Rgba::new(0.0, 0.0, 0.0, 0.5)
+                    },
                 );
             }
         }
@@ -797,6 +939,32 @@ impl Game {
     }
 
     pub fn draw_level_back(&self, framebuffer: &mut ugli::Framebuffer) {
+        let level = if self.customization.postjam {
+            &self.levels.1
+        } else {
+            &self.levels.0
+        };
+        for tile in &level.background_tiles {
+            let assets = &self.assets.background[&tile.type_name];
+            if !assets.params.background {
+                continue;
+            }
+            self.geng.draw_2d(
+                framebuffer,
+                &self.camera,
+                &draw_2d::TexturedPolygon::new(
+                    tile.vertices
+                        .into_iter()
+                        .map(|v| draw_2d::TexturedVertex {
+                            a_pos: v,
+                            a_color: Rgba::WHITE,
+                            a_vt: v - tile.flow * self.simulation_time,
+                        })
+                        .collect(),
+                    &assets.texture,
+                ),
+            );
+        }
         self.geng.draw_2d(
             framebuffer,
             &self.camera,
@@ -814,6 +982,27 @@ impl Game {
             &draw_2d::TexturedQuad::unit(&self.assets.golden_toilet)
                 .translate(self.levels.0.finish_point),
         );
+        {
+            let level = if self.customization.postjam {
+                &self.levels.1
+            } else {
+                &self.levels.0
+            };
+            for obj in &level.objects {
+                self.geng.draw_2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw_2d::TexturedQuad::unit(&self.assets.objects[&obj.type_name])
+                        .transform(Mat3::rotate(if obj.type_name == "unicorn" {
+                            self.real_time
+                        } else {
+                            0.0
+                        }))
+                        .scale_uniform(0.6)
+                        .translate(obj.pos),
+                );
+            }
+        }
         self.draw_level_impl(framebuffer, |assets| assets.back_texture.as_ref());
     }
 
@@ -825,6 +1014,9 @@ impl Game {
         };
         for tile in &level.background_tiles {
             let assets = &self.assets.background[&tile.type_name];
+            if assets.params.background {
+                continue;
+            }
             self.geng.draw_2d(
                 framebuffer,
                 &self.camera,
@@ -834,7 +1026,11 @@ impl Game {
                         .map(|v| draw_2d::TexturedVertex {
                             a_pos: v,
                             a_color: Rgba::WHITE,
-                            a_vt: v - tile.flow * self.simulation_time,
+                            a_vt: v - tile.flow * self.simulation_time
+                                + vec2(
+                                    self.noise(assets.params.texture_movement_frequency),
+                                    self.noise(assets.params.texture_movement_frequency),
+                                ) * assets.params.texture_movement_amplitude,
                         })
                         .collect(),
                     &assets.texture,
@@ -1027,6 +1223,14 @@ impl Game {
             if (guy.pos - self.levels.0.finish_point).len() < 1.5 {
                 guy.finished = true;
             }
+            if !guy.touched_a_unicorn {
+                for object in &self.levels.1.objects {
+                    if (guy.pos - object.pos).len() < 1.5 && object.type_name == "unicorn" {
+                        guy.touched_a_unicorn = true;
+                        guy.auto_fart_timer = self.config.auto_fart_interval;
+                    }
+                }
+            }
 
             if let Some(time) = self.tas_replay {
                 if Some(guy.id) == self.my_guy {
@@ -1084,6 +1288,42 @@ impl Game {
                 );
             guy.vel.y -= self.config.gravity * delta_time;
 
+            let mut in_water = false;
+            let butt = guy.pos + vec2(0.0, -self.config.guy_radius * 0.9).rotate(guy.rot);
+            if self.customization.postjam {
+                'tile_loop: for tile in self.levels.1.background_tiles.iter() {
+                    for i in 0..3 {
+                        let p1 = tile.vertices[i];
+                        let p2 = tile.vertices[(i + 1) % 3];
+                        if Vec2::skew(p2 - p1, guy.pos - p1) < 0.0 {
+                            continue 'tile_loop;
+                        }
+                    }
+                    let relative_vel = guy.vel - tile.flow;
+                    let flow_direction = tile.flow.normalize_or_zero();
+                    let relative_vel_along_flow = Vec2::dot(flow_direction, relative_vel);
+                    let params = &self.assets.background[&tile.type_name].params;
+                    let force_along_flow =
+                        -flow_direction * relative_vel_along_flow * params.friction_along_flow;
+                    let friction_force = -relative_vel * params.friction;
+                    guy.vel +=
+                        (force_along_flow + params.additional_force + friction_force) * delta_time;
+                    guy.w -= guy.w * params.friction * delta_time;
+                }
+                'tile_loop: for tile in self.levels.1.background_tiles.iter() {
+                    for i in 0..3 {
+                        let p1 = tile.vertices[i];
+                        let p2 = tile.vertices[(i + 1) % 3];
+                        if Vec2::skew(p2 - p1, butt - p1) < 0.0 {
+                            continue 'tile_loop;
+                        }
+                    }
+                    if tile.type_name == "water" {
+                        in_water = true;
+                    }
+                }
+            }
+
             let mut farts = 0;
             guy.auto_fart_timer += delta_time;
             if guy.auto_fart_timer >= self.config.auto_fart_interval {
@@ -1106,7 +1346,8 @@ impl Game {
             for _ in 0..farts {
                 for _ in 0..self.config.farticle_count {
                     self.farticles.push(Farticle {
-                        pos: guy.pos,
+                        size: 1.0,
+                        pos: butt,
                         vel: guy.vel
                             + vec2(
                                 global_rng().gen_range(0.0..=self.config.farticle_additional_vel),
@@ -1115,18 +1356,25 @@ impl Game {
                             .rotate(global_rng().gen_range(0.0..=2.0 * f32::PI)),
                         rot: global_rng().gen_range(0.0..2.0 * f32::PI),
                         w: global_rng().gen_range(-self.config.farticle_w..=self.config.farticle_w),
-                        color: self.config.fart_color,
+                        color: if in_water {
+                            self.config.bubble_fart_color
+                        } else if guy.touched_a_unicorn {
+                            Hsva::new(global_rng().gen_range(0.0..1.0), 1.0, 1.0, 0.5).into()
+                        } else {
+                            self.config.fart_color
+                        },
                         t: 1.0,
                     });
                 }
                 guy.vel += vec2(0.0, self.config.fart_strength).rotate(guy.rot);
-                let mut effect = self
-                    .assets
-                    .sfx
-                    .fart
-                    .choose(&mut global_rng())
-                    .unwrap()
-                    .effect();
+                let sounds = if in_water {
+                    &self.assets.sfx.bubble_fart
+                } else if guy.touched_a_unicorn {
+                    &self.assets.sfx.rainbow_fart
+                } else {
+                    &self.assets.sfx.fart
+                };
+                let mut effect = sounds.choose(&mut global_rng()).unwrap().effect();
                 effect.set_volume(
                     (self.volume * (1.0 - (guy.pos - self.camera.center).len() / self.camera.fov))
                         .clamp(0.0, 1.0) as f64,
@@ -1140,7 +1388,7 @@ impl Game {
             struct Collision<'a> {
                 penetration: f32,
                 normal: Vec2<f32>,
-                surface_params: &'a SurfaceParams,
+                assets: &'a SurfaceAssets,
             }
 
             let mut collision_to_resolve = None;
@@ -1149,39 +1397,84 @@ impl Game {
             } else {
                 &self.levels.0
             };
+            let mut was_colliding_water = guy.colliding_water;
+            guy.colliding_water = false;
             for surface in &level.surfaces {
                 let v = surface.vector_from(guy.pos);
                 let penetration = self.config.guy_radius - v.len();
-                if penetration > EPS && Vec2::dot(v, guy.vel) > 0.0 {
-                    let collision = Collision {
-                        penetration,
-                        normal: -v.normalize_or_zero(),
-                        surface_params: &self.assets.surfaces[&surface.type_name].params,
-                    };
-                    collision_to_resolve =
-                        std::cmp::max_by_key(collision_to_resolve, Some(collision), |collision| {
-                            r32(match collision {
-                                Some(collision) => collision.penetration,
-                                None => -1.0,
-                            })
-                        });
-                }
-            }
-            if self.customization.postjam {
-                'tile_loop: for (index, tile) in self.levels.1.background_tiles.iter().enumerate() {
-                    for i in 0..3 {
-                        let p1 = tile.vertices[i];
-                        let p2 = tile.vertices[(i + 1) % 3];
-                        if Vec2::skew(p2 - p1, guy.pos - p1) < 0.0 {
-                            continue 'tile_loop;
+                if penetration > EPS {
+                    let assets = &self.assets.surfaces[&surface.type_name];
+
+                    if surface.type_name == "water" {
+                        guy.colliding_water = true;
+                        if !was_colliding_water {
+                            was_colliding_water = true;
+                            if Vec2::dot(v, guy.vel).abs() > 0.5 {
+                                let mut effect = self.assets.sfx.water_splash.effect();
+                                effect.set_volume(
+                                    (self.volume
+                                        * 0.6
+                                        * (1.0
+                                            - (guy.pos - self.camera.center).len()
+                                                / self.camera.fov))
+                                        .clamp(0.0, 1.0) as f64,
+                                );
+                                effect.play();
+                                for _ in 0..30 {
+                                    self.farticles.push(Farticle {
+                                        size: 0.6,
+                                        pos: guy.pos
+                                            + v
+                                            + vec2(
+                                                global_rng().gen_range(
+                                                    -self.config.guy_radius
+                                                        ..=self.config.guy_radius,
+                                                ),
+                                                0.0,
+                                            ),
+                                        vel: {
+                                            let mut v =
+                                                vec2(0.0, global_rng().gen_range(0.0..=1.0))
+                                                    .rotate(
+                                                        global_rng().gen_range(
+                                                            -f32::PI / 4.0..=f32::PI / 4.0,
+                                                        ),
+                                                    );
+                                            v.y *= 0.3;
+                                            v * 2.0
+                                        },
+                                        rot: global_rng().gen_range(0.0..2.0 * f32::PI),
+                                        w: global_rng().gen_range(
+                                            -self.config.farticle_w..=self.config.farticle_w,
+                                        ),
+                                        color: self.config.bubble_fart_color,
+                                        t: 0.5,
+                                    });
+                                }
+                            }
                         }
                     }
-                    let mut relative_vel = guy.vel - tile.flow;
-                    let n = tile.flow.rotate_90().normalize_or_zero();
-                    relative_vel -= n * Vec2::dot(n, relative_vel); // TODO: not always wanted, another param?
-                    let params = &self.assets.background[&tile.type_name].params;
-                    let force = -relative_vel * params.friction;
-                    guy.vel += force * delta_time;
+
+                    if assets.params.non_collidable {
+                        continue;
+                    }
+                    if Vec2::dot(v, guy.vel) > EPS {
+                        let collision = Collision {
+                            penetration,
+                            normal: -v.normalize_or_zero(),
+                            assets,
+                        };
+                        collision_to_resolve = std::cmp::max_by_key(
+                            collision_to_resolve,
+                            Some(collision),
+                            |collision| {
+                                r32(match collision {
+                                    Some(collision) => collision.penetration,
+                                    None => -1.0,
+                                })
+                            },
+                        );
+                    }
                 }
             }
             if let Some(collision) = collision_to_resolve {
@@ -1190,11 +1483,24 @@ impl Game {
                 let tangent = collision.normal.rotate_90();
                 let tangent_vel = Vec2::dot(guy.vel, tangent) - guy.w * self.config.guy_radius;
                 guy.vel -=
-                    collision.normal * normal_vel * (1.0 + collision.surface_params.bounciness);
-                let max_friction_impulse = normal_vel.abs() * collision.surface_params.friction;
+                    collision.normal * normal_vel * (1.0 + collision.assets.params.bounciness);
+                let max_friction_impulse = normal_vel.abs() * collision.assets.params.friction;
                 let friction_impulse = -tangent_vel.clamp_abs(max_friction_impulse);
                 guy.vel += tangent * friction_impulse;
                 guy.w -= friction_impulse / self.config.guy_radius;
+                if let Some(sound) = &collision.assets.sound {
+                    let volume = ((-0.5 - normal_vel) / 2.0).clamp(0.0, 1.0);
+                    if volume > 0.0 && self.customization.postjam {
+                        let mut effect = sound.effect();
+                        effect.set_volume(
+                            (self.volume
+                                * volume
+                                * (1.0 - (guy.pos - self.camera.center).len() / self.camera.fov))
+                                .clamp(0.0, 1.0) as f64,
+                        );
+                        effect.play();
+                    }
+                }
             }
         }
     }
@@ -1236,6 +1542,9 @@ impl Game {
             .contains_key(&editor.selected_background)
         {
             editor.selected_background = self.assets.background.keys().next().unwrap().clone();
+        }
+        if !self.assets.objects.contains_key(&editor.selected_object) {
+            editor.selected_object = self.assets.objects.keys().next().unwrap().clone();
         }
 
         match event {
@@ -1350,6 +1659,20 @@ impl Game {
                         self.geng.window().mouse_pos().map(|x| x as f32),
                     ));
                 }
+                geng::Key::O => {
+                    let level = if self.customization.postjam {
+                        &mut self.levels.1
+                    } else {
+                        &mut self.levels.0
+                    };
+                    level.objects.push(Object {
+                        type_name: editor.selected_object.to_owned(),
+                        pos: self.camera.screen_to_world(
+                            self.framebuffer_size,
+                            self.geng.window().mouse_pos().map(|x| x as f32),
+                        ),
+                    });
+                }
                 geng::Key::Backspace => {
                     let level = if self.customization.postjam {
                         &mut self.levels.1
@@ -1437,7 +1760,7 @@ impl Game {
                     },
                 )
                 .transform(Mat3::rotate(farticle.rot))
-                .scale_uniform(self.config.farticle_size)
+                .scale_uniform(self.config.farticle_size * farticle.size)
                 .translate(farticle.pos),
             )
         }
@@ -1457,7 +1780,7 @@ impl Game {
                             } else {
                                 self.levels.0.spawn_point
                             },
-                            !self.customization.postjam,
+                            true,
                         );
                         if self.my_guy.is_none() {
                             self.my_guy = Some(self.client_id);
@@ -1531,6 +1854,26 @@ impl Game {
         }
     }
 
+    pub fn respawn(&mut self) {
+        // COPYPASTA MMMMM 🍝
+        let new_guy = Guy::new(
+            self.client_id,
+            if self.customization.postjam {
+                self.levels.1.spawn_point
+            } else {
+                self.levels.0.spawn_point
+            },
+            true,
+        );
+        if self.my_guy.is_none() {
+            self.my_guy = Some(self.client_id);
+        }
+        self.guys.insert(new_guy);
+        self.simulation_time = 0.0;
+        self.tas = default();
+        self.connection.send(ClientMessage::Despawn);
+    }
+
     pub fn draw_customizer(&mut self, framebuffer: &mut ugli::Framebuffer) {
         if !self.show_customizer {
             return;
@@ -1584,8 +1927,28 @@ impl Game {
                     self.show_customizer = false;
                 }
                 UiMessage::RandomizeSkin => {
-                    self.customization.colors =
-                        Guy::new(-1, Vec2::ZERO, !self.customization.postjam).colors;
+                    self.customization.colors = Guy::new(-1, Vec2::ZERO, true).colors;
+                }
+                UiMessage::TogglePostJam => {
+                    if self.customization.postjam {
+                        self.customization.postjam = false;
+                    } else {
+                        self.customization.postjam = true;
+                    }
+                    self.buttons
+                        .iter_mut()
+                        .find(|button| button.text.starts_with("postjam"))
+                        .unwrap()
+                        .text = format!(
+                        "postjam ({})",
+                        if self.customization.postjam {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    );
+
+                    self.respawn();
                 }
             }
         }
@@ -1598,26 +1961,13 @@ impl Game {
                 if *key == geng::Key::Backspace {
                     self.customization.name.pop();
                 }
-                if self.customization.name.to_lowercase() == "postjamplease" {
-                    self.customization.postjam = true;
-                    self.show_leaderboard = true;
-                }
-                if self.customization.name.to_lowercase() == "iamoutfrost" {
-                    self.customization.postjam = true;
-                    self.show_leaderboard = true;
-                    self.opt.editor = true;
-                    if let Some(id) = self.my_guy.take() {
-                        self.connection.send(ClientMessage::Despawn);
-                        self.guys.remove(&id);
-                    }
-                }
             }
             _ => {}
         }
     }
 
     fn draw_leaderboard(&self, framebuffer: &mut ugli::Framebuffer) {
-        if !self.show_leaderboard {
+        if !self.show_leaderboard || !self.customization.postjam {
             return;
         }
         let mut guys: Vec<&Guy> = self.guys.iter().filter(|guy| guy.postjam).collect();
@@ -1816,9 +2166,10 @@ impl geng::State for Game {
                 guy.progress = progress;
                 self.best_progress = self.best_progress.max(progress);
                 guy.best_progress = self.best_progress;
-                if guy.finished && self.simulation_time < guy.best_time.unwrap_or(1e9) {
-                    guy.best_time = Some(self.simulation_time);
+                if guy.finished && self.simulation_time < self.best_time.unwrap_or(1e9) {
+                    self.best_time = Some(self.simulation_time);
                 }
+                guy.best_time = self.best_time;
                 let mut time_text = String::new();
                 let seconds = self.simulation_time.round() as i32;
                 let minutes = seconds / 60;
@@ -2089,38 +2440,12 @@ impl geng::State for Game {
             geng::Event::KeyDown { key: geng::Key::R }
                 if self.geng.window().is_key_pressed(geng::Key::LCtrl) =>
             {
-                if self.my_guy.is_none() && self.editor.is_none() {
-                    self.connection.send(ClientMessage::ForceReset);
-                } else {
-                    if !self.customization.postjam
-                        || !self
-                            .guys
-                            .iter()
-                            .any(|guy| guy.name.to_lowercase() == "pomo")
-                    {
-                        let new_guy = Guy::new(
-                            self.client_id,
-                            if self.customization.postjam {
-                                self.levels.1.spawn_point
-                            } else {
-                                self.levels.0.spawn_point
-                            },
-                            !self.customization.postjam,
-                        );
-                        if self.my_guy.is_none() {
-                            self.my_guy = Some(self.client_id);
-                        }
-                        self.guys.insert(new_guy);
-                        self.simulation_time = 0.0;
-                        self.connection.send(ClientMessage::Despawn);
-                        self.tas = default();
-                    }
-                }
+                self.respawn();
             }
-            geng::Event::KeyDown { key: geng::Key::H } => {
+            geng::Event::KeyDown { key: geng::Key::H } if !self.show_customizer => {
                 self.show_names = !self.show_names;
             }
-            geng::Event::KeyDown { key: geng::Key::L } => {
+            geng::Event::KeyDown { key: geng::Key::L } if !self.show_customizer => {
                 if self.customization.postjam {
                     self.show_leaderboard = !self.show_leaderboard;
                 }
@@ -2158,6 +2483,9 @@ pub struct Opt {
 fn main() {
     geng::setup_panic_handler();
     let mut opt: Opt = program_args::parse();
+
+    // TODO: postjam by default when jam is finished
+    // opt.postjam = true;
 
     if opt.connect.is_none() && opt.server.is_none() {
         if cfg!(target_arch = "wasm32") {
