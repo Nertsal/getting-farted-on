@@ -47,6 +47,30 @@ impl Drop for Game {
     }
 }
 
+impl tas::Tasable for Game {
+    type Saved = Option<Guy>;
+
+    fn save(&self) -> Self::Saved {
+        self.my_guy.and_then(|id| self.guys.get(&id)).cloned()
+    }
+
+    fn load(&mut self, state: Self::Saved) {
+        match state {
+            Some(mut guy) => {
+                if let Some(id) = self.my_guy {
+                    guy.id = id;
+                    self.guys.insert(guy);
+                }
+            }
+            None => {
+                if let Some(id) = &self.my_guy {
+                    self.guys.remove(id);
+                }
+            }
+        }
+    }
+}
+
 impl Game {
     pub fn new(
         geng: &Geng,

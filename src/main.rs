@@ -16,6 +16,7 @@ mod level;
 mod logic;
 mod net;
 mod remote;
+mod tas;
 mod util;
 
 pub use assets::*;
@@ -127,7 +128,7 @@ fn main() {
                     let old_level = serde_json::from_str(&old_level.unwrap()).unwrap();
                     let new_level = serde_json::from_str(&new_level.unwrap()).unwrap();
                     let assets = Rc::new(assets);
-                    Game::new(
+                    let game = Game::new(
                         &geng,
                         &assets,
                         Levels {
@@ -137,7 +138,8 @@ fn main() {
                         opt,
                         client_id,
                         connection,
-                    )
+                    );
+                    tas::Tas::new(game, &geng)
                 }
             },
         );
