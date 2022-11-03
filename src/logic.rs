@@ -32,32 +32,31 @@ impl Game {
         };
         if my_guy.input != new_input {
             my_guy.input = new_input;
-            self.connection
-                .send(ClientMessage::Update(self.simulation_time, my_guy.clone()));
+            if let Some(con) = &mut self.connection {
+                con.send(ClientMessage::Update(self.simulation_time, my_guy.clone()));
+            }
         }
     }
 
     pub fn update_guys(&mut self, delta_time: f32) {
-        let level = self.levels.get(self.customization.postjam);
         for guy in &mut self.guys {
-            if (guy.pos - level.finish_point).len() < 1.5 {
+            if (guy.pos - self.level.finish_point).len() < 1.5 {
                 guy.finished = true;
             }
             if !guy.touched_a_unicorn {
-                for object in &level.objects {
+                for object in &self.level.objects {
                     if (guy.pos - object.pos).len() < 1.5 && object.type_name == "unicorn" {
                         guy.touched_a_unicorn = true;
-                        guy.auto_fart_timer = self.config.auto_fart_interval;
+                        guy.fart_pressure = self.config.max_fart_pressure;
                     }
                 }
             }
 
             if guy.finished {
-                guy.auto_fart_timer = 0.0;
-                guy.force_fart_timer = 0.0;
+                guy.fart_pressure = 0.0;
                 guy.rot -= delta_time;
-                guy.pos = level.finish_point
-                    + (guy.pos - level.finish_point)
+                guy.pos = self.level.finish_point
+                    + (guy.pos - self.level.finish_point)
                         .normalize_or_zero()
                         .rotate(delta_time)
                         * 1.0;
@@ -76,7 +75,7 @@ impl Game {
             let mut in_water = false;
             let butt = guy.pos + vec2(0.0, -self.config.guy_radius * 0.9).rotate(guy.rot);
             if self.customization.postjam {
-                'tile_loop: for tile in &level.tiles {
+                'tile_loop: for tile in &self.level.tiles {
                     for i in 0..3 {
                         let p1 = tile.vertices[i];
                         let p2 = tile.vertices[(i + 1) % 3];
@@ -95,7 +94,7 @@ impl Game {
                         (force_along_flow + params.additional_force + friction_force) * delta_time;
                     guy.w -= guy.w * params.friction * delta_time;
                 }
-                'tile_loop: for tile in &level.tiles {
+                'tile_loop: for tile in &self.level.tiles {
                     for i in 0..3 {
                         let p1 = tile.vertices[i];
                         let p2 = tile.vertices[(i + 1) % 3];
@@ -109,26 +108,150 @@ impl Game {
                 }
             }
 
-            let mut farts = 0;
-            guy.auto_fart_timer += delta_time;
-            if guy.auto_fart_timer >= self.config.auto_fart_interval {
-                guy.auto_fart_timer = 0.0;
-                farts += 1;
+            let could_fart = guy.fart_pressure >= self.config.fart_pressure_released;
+            if self.config.fart_continued_force == 0.0 {
+                guy.farting = false;
             }
-            let could_force_fart = guy.force_fart_timer >= self.config.force_fart_interval;
-            guy.force_fart_timer += delta_time;
-            if guy.force_fart_timer >= self.config.force_fart_interval && guy.input.force_fart {
-                farts += 1;
-                guy.force_fart_timer = 0.0;
-            }
-            if !could_force_fart && guy.force_fart_timer >= self.config.force_fart_interval {
-                if Some(guy.id) == self.my_guy {
-                    let mut effect = self.assets.sfx.fart_recharge.effect();
-                    effect.set_volume(self.volume as f64 * 0.5);
-                    effect.play();
+            if guy.input.force_fart {
+                if guy.farting {
+                    guy.fart_pressure -= delta_time * self.config.fart_continuation_pressure_speed;
+                    if guy.fart_pressure < 0.0 {
+                        guy.fart_pressure = 0.0;
+                        guy.farting = false;
+                    }
+                } else {
+                    guy.fart_pressure += delta_time * self.config.force_fart_pressure_multiplier;
+                }
+            } else {
+                guy.farting = false;
+                guy.fart_pressure += delta_time;
+            };
+
+            if !guy.farting {
+                if let Some(sfx) = self.long_fart_sfx.get_mut(&guy.id) {
+                    if sfx.finish_time.is_none() {
+                        sfx.finish_time = Some(self.real_time);
+                    }
+                    let fadeout = (self.real_time - sfx.finish_time.unwrap()) / 0.2;
+                    if fadeout >= 1.0 {
+                        sfx.sfx.pause();
+                        sfx.bubble_sfx.pause();
+                        sfx.rainbow_sfx.pause();
+                        self.long_fart_sfx.remove(&guy.id);
+                    } else {
+                        let active_index = if in_water {
+                            0
+                        } else if guy.touched_a_unicorn {
+                            1
+                        } else {
+                            2
+                        };
+                        for (index, sfx) in
+                            [&mut sfx.bubble_sfx, &mut sfx.rainbow_sfx, &mut sfx.sfx]
+                                .into_iter()
+                                .enumerate()
+                        {
+                            if index == active_index {
+                                sfx.set_volume(
+                                    (self.volume
+                                        * (1.0
+                                            - (guy.pos - self.camera.center).len()
+                                                / self.camera.fov))
+                                        .clamp(0.0, 1.0) as f64
+                                        * (1.0 - fadeout) as f64,
+                                );
+                            } else {
+                                sfx.set_volume(0.0);
+                            }
+                        }
+                    }
+                }
+            } else {
+                if let Some(sfx) = self.long_fart_sfx.get_mut(&guy.id) {
+                    let active_index = if in_water {
+                        0
+                    } else if guy.touched_a_unicorn {
+                        1
+                    } else {
+                        2
+                    };
+                    for (index, sfx) in [&mut sfx.bubble_sfx, &mut sfx.rainbow_sfx, &mut sfx.sfx]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if index == active_index {
+                            sfx.set_volume(
+                                (self.volume
+                                    * (1.0
+                                        - (guy.pos - self.camera.center).len() / self.camera.fov))
+                                    .clamp(0.0, 1.0) as f64,
+                            );
+                        } else {
+                            sfx.set_volume(0.0);
+                        }
+                    }
+                } else {
+                    warn!("No sfx for long fart?");
                 }
             }
-            for _ in 0..farts {
+
+            if guy.farting {
+                guy.next_farticle -= delta_time;
+                while guy.next_farticle < 0.0 {
+                    guy.next_farticle += 1.0 / self.config.long_fart_farticles_per_second;
+                    self.farticles.push(Farticle {
+                        size: 1.0,
+                        pos: butt,
+                        vel: guy.vel
+                            + vec2(
+                                global_rng().gen_range(0.0..=self.config.farticle_additional_vel),
+                                0.0,
+                            )
+                            .rotate(global_rng().gen_range(0.0..=2.0 * f32::PI))
+                            + vec2(0.0, -self.config.long_fart_farticle_speed).rotate(guy.rot),
+                        rot: global_rng().gen_range(0.0..2.0 * f32::PI),
+                        w: global_rng().gen_range(-self.config.farticle_w..=self.config.farticle_w),
+                        color: if in_water {
+                            self.config.bubble_fart_color
+                        } else if guy.touched_a_unicorn {
+                            Hsva::new(global_rng().gen_range(0.0..1.0), 1.0, 1.0, 0.5).into()
+                        } else {
+                            self.config.fart_color
+                        },
+                        t: 1.0,
+                    });
+                }
+                guy.vel += vec2(0.0, self.config.fart_continued_force * delta_time).rotate(guy.rot);
+            } else if (guy.fart_pressure >= self.config.fart_pressure_released
+                && guy.input.force_fart)
+                || guy.fart_pressure >= self.config.max_fart_pressure
+            {
+                guy.fart_pressure -= self.config.fart_pressure_released;
+                guy.farting = true;
+                {
+                    let mut sfx = self.assets.sfx.long_fart.effect();
+                    sfx.set_volume(0.0);
+                    sfx.play();
+                    let mut bubble_sfx = self.assets.sfx.bubble_long_fart.effect();
+                    bubble_sfx.set_volume(0.0);
+                    bubble_sfx.play();
+                    let mut rainbow_sfx = self.assets.sfx.rainbow_long_fart.effect();
+                    rainbow_sfx.set_volume(0.0);
+                    rainbow_sfx.play();
+                    if let Some(mut sfx) = self.long_fart_sfx.insert(
+                        guy.id,
+                        LongFartSfx {
+                            finish_time: None,
+                            sfx,
+                            bubble_sfx,
+                            rainbow_sfx,
+                        },
+                    ) {
+                        sfx.bubble_sfx.pause();
+                        sfx.sfx.pause();
+                        sfx.rainbow_sfx.pause();
+                    }
+                }
                 for _ in 0..self.config.farticle_count {
                     self.farticles.push(Farticle {
                         size: 1.0,
@@ -165,6 +288,21 @@ impl Game {
                         .clamp(0.0, 1.0) as f64,
                 );
                 effect.play();
+            } else if !could_fart && guy.fart_pressure >= self.config.fart_pressure_released {
+                // Growling stomach recharge
+                if Some(guy.id) == self.my_guy {
+                    let mut effect = self.assets.sfx.fart_recharge.effect();
+                    effect.set_volume(self.volume as f64 * 0.5);
+                    effect.play();
+                }
+                guy.growl_progress = Some(0.0);
+            }
+
+            if let Some(growl) = &mut guy.growl_progress {
+                *growl += delta_time / self.config.growl_time;
+                if *growl >= 1.0 {
+                    guy.growl_progress = None;
+                }
             }
 
             guy.pos += guy.vel * delta_time;
@@ -179,7 +317,7 @@ impl Game {
             let mut collision_to_resolve = None;
             let mut was_colliding_water = guy.colliding_water;
             guy.colliding_water = false;
-            for surface in &level.surfaces {
+            for surface in &self.level.surfaces {
                 let v = surface.vector_from(guy.pos);
                 let penetration = self.config.guy_radius - v.len();
                 if penetration > EPS {
@@ -262,14 +400,15 @@ impl Game {
                 let normal_vel = Vec2::dot(guy.vel, collision.normal);
                 let tangent = collision.normal.rotate_90();
                 let tangent_vel = Vec2::dot(guy.vel, tangent) - guy.w * self.config.guy_radius;
-                guy.vel -=
-                    collision.normal * normal_vel * (1.0 + collision.assets.params.bounciness);
+                let impulse = (-normal_vel * (1.0 + collision.assets.params.bounciness))
+                    .max(-normal_vel + collision.assets.params.min_bounce_vel);
+                guy.vel += collision.normal * impulse;
                 let max_friction_impulse = normal_vel.abs() * collision.assets.params.friction;
                 let friction_impulse = -tangent_vel.clamp_abs(max_friction_impulse);
                 guy.vel += tangent * friction_impulse;
                 guy.w -= friction_impulse / self.config.guy_radius;
                 if let Some(sound) = &collision.assets.sound {
-                    let volume = ((-0.5 - normal_vel) / 2.0).clamp(0.0, 1.0);
+                    let volume = ((-0.5 + impulse / 2.0) / 2.0).clamp(0.0, 1.0);
                     if volume > 0.0 && self.customization.postjam {
                         let mut effect = sound.effect();
                         effect.set_volume(
@@ -286,18 +425,22 @@ impl Game {
     }
 
     pub fn handle_connection(&mut self) {
-        let messages: Vec<ServerMessage> = self.connection.new_messages().collect();
+        let messages: Vec<ServerMessage> = match &mut self.connection {
+            Some(con) => con.new_messages().collect(),
+            None => return,
+        };
         for message in messages {
             match message {
                 ServerMessage::ForceReset => {
                     self.respawn_my_guy();
                 }
                 ServerMessage::Pong => {
-                    self.connection.send(ClientMessage::Ping);
-                    if let Some(id) = self.my_guy {
-                        let guy = self.guys.get(&id).unwrap();
-                        self.connection
-                            .send(ClientMessage::Update(self.simulation_time, guy.clone()));
+                    if let Some(con) = &mut self.connection {
+                        con.send(ClientMessage::Ping);
+                        if let Some(id) = self.my_guy {
+                            let guy = self.guys.get(&id).unwrap();
+                            con.send(ClientMessage::Update(self.simulation_time, guy.clone()));
+                        }
                     }
                 }
                 ServerMessage::ClientId(_) => unreachable!(),
@@ -327,16 +470,14 @@ impl Game {
 
     pub fn respawn_my_guy(&mut self) {
         // COPYPASTA MMMMM 🍝 or is it anymore?
-        let new_guy = Guy::new(
-            self.client_id,
-            self.levels.get(self.customization.postjam).spawn_point,
-            true,
-        );
+        let new_guy = Guy::new(self.client_id, self.level.spawn_point, true);
         if self.my_guy.is_none() {
             self.my_guy = Some(self.client_id);
         }
         self.guys.insert(new_guy);
         self.simulation_time = 0.0;
-        self.connection.send(ClientMessage::Despawn);
+        if let Some(con) = &mut self.connection {
+            con.send(ClientMessage::Despawn);
+        }
     }
 }

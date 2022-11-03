@@ -55,8 +55,7 @@ fn main() {
         if cfg!(target_arch = "wasm32") {
             opt.connect = Some(
                 option_env!("CONNECT")
-                    .unwrap_or("ws://127.0.0.1:1155")
-                    // .expect("Set CONNECT compile time env var")
+                    .expect("Set CONNECT compile time env var")
                     .to_owned(),
             );
         } else {
@@ -89,17 +88,22 @@ fn main() {
             vsync: false,
             ..default()
         });
-        let connection = geng::net::client::connect::<ServerMessage, ClientMessage>(
-            opt.connect.as_deref().unwrap(),
-        )
-        .then(|connection| async move {
-            let (message, mut connection) = connection.into_future().await;
-            let id = match message {
-                Some(ServerMessage::ClientId(id)) => id,
-                _ => unreachable!(),
-            };
-            connection.send(ClientMessage::Ping);
-            (id, connection)
+        let connection = future::OptionFuture::<_>::from(match opt.connect.as_deref().unwrap() {
+            "singleplayer" => None,
+            addr => Some(geng::net::client::connect::<ServerMessage, ClientMessage>(
+                addr,
+            )),
+        })
+        .then(|connection| {
+            future::OptionFuture::from(connection.map(|connection| async {
+                let (message, mut connection) = connection.into_future().await;
+                let id = match message {
+                    Some(ServerMessage::ClientId(id)) => id,
+                    _ => unreachable!(),
+                };
+                connection.send(ClientMessage::Ping);
+                (id, connection)
+            }))
         });
         let state = geng::LoadingScreen::new(
             &geng,
@@ -107,38 +111,18 @@ fn main() {
             future::join(
                 future::join(
                     <Assets as geng::LoadAsset>::load(&geng, &static_path()),
-                    future::join(
-                        <String as geng::LoadAsset>::load(
-                            &geng,
-                            &static_path().join("old_level.json"),
-                        ),
-                        <String as geng::LoadAsset>::load(
-                            &geng,
-                            &static_path().join("new_level.json"),
-                        ),
-                    ),
+                    <String as geng::LoadAsset>::load(&geng, &static_path().join("level.json")),
                 ),
                 connection,
             ),
             {
                 let geng = geng.clone();
-                move |((assets, (old_level, new_level)), (client_id, connection))| {
+                move |((assets, level), connection_info)| {
                     let mut assets = assets.expect("Failed to load assets");
+                    let level = Level::new(serde_json::from_str(&level.unwrap()).unwrap());
                     assets.process();
-                    let old_level = serde_json::from_str(&old_level.unwrap()).unwrap();
-                    let new_level = serde_json::from_str(&new_level.unwrap()).unwrap();
                     let assets = Rc::new(assets);
-                    let game = Game::new(
-                        &geng,
-                        &assets,
-                        Levels {
-                            jam: old_level,
-                            postjam: new_level,
-                        },
-                        opt,
-                        client_id,
-                        connection,
-                    );
+                    let game = Game::new(&geng, &assets, level, opt, connection_info);
                     tas::Tas::new(game, &geng)
                 }
             },

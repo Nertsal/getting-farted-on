@@ -4,6 +4,13 @@ pub const CONTROLS_LEFT: [geng::Key; 2] = [geng::Key::A, geng::Key::Left];
 pub const CONTROLS_RIGHT: [geng::Key; 2] = [geng::Key::D, geng::Key::Right];
 pub const CONTROLS_FORCE_FART: [geng::Key; 3] = [geng::Key::W, geng::Key::Up, geng::Key::Space];
 
+pub struct LongFartSfx {
+    pub finish_time: Option<f32>,
+    pub sfx: geng::SoundEffect,
+    pub bubble_sfx: geng::SoundEffect,
+    pub rainbow_sfx: geng::SoundEffect,
+}
+
 pub struct Game {
     pub best_time: Option<f32>,
     pub emotes: Vec<(f32, Id, usize)>,
@@ -14,7 +21,7 @@ pub struct Game {
     pub config: Config,
     pub assets: Rc<Assets>,
     pub camera: geng::Camera2d,
-    pub levels: Levels,
+    pub level: Level,
     pub editor: Option<EditorState>,
     pub guys: Collection<Guy>,
     pub my_guy: Option<Id>,
@@ -27,8 +34,9 @@ pub struct Game {
     pub farticles: Vec<Farticle>,
     pub volume: f32,
     pub client_id: Id,
-    pub connection: Connection,
+    pub connection: Option<Connection>,
     pub customization: Guy,
+    pub mute_music: bool,
     pub ui_controller: ui::Controller,
     pub buttons: Vec<ui::Button<UiMessage>>,
     pub show_customizer: bool,
@@ -37,12 +45,13 @@ pub struct Game {
     pub show_names: bool,
     pub show_leaderboard: bool,
     pub follow: Option<Id>,
+    pub long_fart_sfx: HashMap<Id, LongFartSfx>,
 }
 
 impl Drop for Game {
     fn drop(&mut self) {
         if let Some(editor) = &mut self.editor {
-            editor.save_level(&self.levels);
+            editor.save_level(&self.level);
         }
     }
 }
@@ -75,11 +84,14 @@ impl Game {
     pub fn new(
         geng: &Geng,
         assets: &Rc<Assets>,
-        levels: Levels,
+        level: Level,
         opt: Opt,
-        client_id: Id,
-        connection: Connection,
+        connection_info: Option<(Id, Connection)>,
     ) -> Self {
+        let (client_id, connection) = match connection_info {
+            Some((client_id, connection)) => (client_id, Some(connection)),
+            None => (-1, None),
+        };
         let mut result = Self {
             best_time: None,
             emotes: vec![],
@@ -93,11 +105,11 @@ impl Game {
             },
             framebuffer_size: vec2(1.0, 1.0),
             editor: if opt.editor {
-                Some(EditorState::new())
+                Some(EditorState::new(geng, assets))
             } else {
                 None
             },
-            levels,
+            level,
             guys: Collection::new(),
             my_guy: None,
             real_time: 0.0,
@@ -118,6 +130,7 @@ impl Game {
                 }
                 guy
             },
+            mute_music: false,
             best_progress: 0.0,
             ui_controller: ui::Controller::new(geng, assets),
             buttons: vec![
@@ -151,14 +164,13 @@ impl Game {
             show_names: true,
             show_leaderboard: true,
             follow: None,
+            long_fart_sfx: HashMap::new(),
         };
         if !opt.editor {
             result.my_guy = Some(client_id);
-            result.guys.insert(Guy::new(
-                client_id,
-                result.levels.get(result.customization.postjam).spawn_point,
-                true,
-            ));
+            result
+                .guys
+                .insert(Guy::new(client_id, result.level.spawn_point, true));
         }
         result
     }
@@ -185,34 +197,7 @@ impl Game {
                     Rgba::BLACK,
                 );
             }
-            let progress = {
-                let level = self.levels.get(self.customization.postjam);
-                let mut total_len = 0.0;
-                for window in level.expected_path.windows(2) {
-                    let a = window[0];
-                    let b = window[1];
-                    total_len += (b - a).len();
-                }
-                let mut progress = 0.0;
-                let mut closest_point_distance = 1e9;
-                let mut prefix_len = 0.0;
-                for window in level.expected_path.windows(2) {
-                    let a = window[0];
-                    let b = window[1];
-                    let v = Surface {
-                        p1: a,
-                        p2: b,
-                        type_name: String::new(),
-                    }
-                    .vector_from(guy.pos);
-                    if v.len() < closest_point_distance {
-                        closest_point_distance = v.len();
-                        progress = (prefix_len + (guy.pos + v - a).len()) / total_len;
-                    }
-                    prefix_len += (b - a).len();
-                }
-                progress
-            };
+            let progress = self.level.progress_at(guy.pos);
             guy.progress = progress;
             self.best_progress = self.best_progress.max(progress);
             guy.best_progress = self.best_progress;
@@ -287,13 +272,11 @@ impl geng::State for Game {
         self.framebuffer_size = framebuffer.size().map(|x| x as f32);
         ugli::clear(framebuffer, Some(self.config.background_color), None, None);
 
-        let level = self.levels.get(self.customization.postjam);
-
-        self.draw_level_back(level, framebuffer);
+        self.draw_level_back(&self.level, framebuffer);
         test += &format!("lvl back {}\n", timer.tick());
         self.draw_guys(framebuffer);
         test += &format!("guys {}\n", timer.tick());
-        self.draw_level_front(level, framebuffer);
+        self.draw_level_front(&self.level, framebuffer);
         test += &format!("lvl front {}\n", timer.tick());
         self.draw_farticles(framebuffer);
         test += &format!("farticles {}\n", timer.tick());
@@ -333,7 +316,10 @@ impl geng::State for Game {
             self.volume -= delta_time as f32 * 0.5;
         }
         self.volume = self.volume.clamp(0.0, 1.0);
-        if self.customization.postjam {
+        if self.mute_music {
+            self.new_music.set_volume(0.0);
+            self.old_music.set_volume(0.0);
+        } else if self.customization.postjam {
             self.new_music.set_volume(self.volume as f64);
             self.old_music.set_volume(0.0);
         } else {
@@ -364,7 +350,7 @@ impl geng::State for Game {
         }
 
         if let Some(editor) = &mut self.editor {
-            editor.update(&mut self.levels, delta_time);
+            editor.update(&mut self.level, delta_time);
         }
 
         self.handle_connection();
@@ -427,6 +413,9 @@ impl geng::State for Game {
             {
                 self.respawn_my_guy();
             }
+            geng::Event::KeyDown { key: geng::Key::M } if !self.show_customizer => {
+                self.mute_music = !self.mute_music;
+            }
             geng::Event::KeyDown { key: geng::Key::H } if !self.show_customizer => {
                 self.show_names = !self.show_names;
             }
@@ -437,18 +426,41 @@ impl geng::State for Game {
             }
             geng::Event::KeyDown {
                 key: geng::Key::Num1,
-            } => self.connection.send(ClientMessage::Emote(0)),
+            } => {
+                if let Some(con) = &mut self.connection {
+                    con.send(ClientMessage::Emote(0));
+                }
+            }
             geng::Event::KeyDown {
                 key: geng::Key::Num2,
-            } => self.connection.send(ClientMessage::Emote(1)),
+            } => {
+                if let Some(con) = &mut self.connection {
+                    con.send(ClientMessage::Emote(1));
+                }
+            }
             geng::Event::KeyDown {
                 key: geng::Key::Num3,
-            } => self.connection.send(ClientMessage::Emote(2)),
+            } => {
+                if let Some(con) = &mut self.connection {
+                    con.send(ClientMessage::Emote(2));
+                }
+            }
             geng::Event::KeyDown {
                 key: geng::Key::Num4,
-            } => self.connection.send(ClientMessage::Emote(3)),
+            } => {
+                if let Some(con) = &mut self.connection {
+                    con.send(ClientMessage::Emote(3));
+                }
+            }
             _ => {}
         }
         self.prev_mouse_pos = self.geng.window().mouse_pos();
+    }
+    fn ui<'a>(&'a mut self, cx: &'a geng::ui::Controller) -> Box<dyn geng::ui::Widget + 'a> {
+        if self.editor.is_some() {
+            self.editor_ui(cx)
+        } else {
+            Box::new(geng::ui::Void)
+        }
     }
 }

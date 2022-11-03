@@ -12,20 +12,22 @@ pub struct Input {
 pub struct Guy {
     pub name: String,
     pub colliding_water: bool,
+    pub growl_progress: Option<f32>,
     pub id: Id,
     pub pos: Vec2<f32>,
     pub vel: Vec2<f32>,
     pub rot: f32,
     pub w: f32,
+    pub farting: bool,
     pub input: Input,
-    pub auto_fart_timer: f32,
-    pub force_fart_timer: f32,
+    pub fart_pressure: f32,
     pub finished: bool,
     pub colors: GuyColors,
     pub postjam: bool,
     pub progress: f32,
     pub best_progress: f32,
     pub best_time: Option<f32>,
+    pub next_farticle: f32,
     pub touched_a_unicorn: bool,
 }
 
@@ -44,6 +46,8 @@ impl Guy {
             Hsva::new(hue, 1.0, 1.0, 1.0).into()
         };
         Self {
+            farting: false,
+            growl_progress: None,
             colliding_water: false,
             name: "".to_owned(),
             id,
@@ -61,8 +65,7 @@ impl Guy {
             },
             w: 0.0,
             input: Input::default(),
-            auto_fart_timer: 0.0,
-            force_fart_timer: 0.0,
+            fart_pressure: 0.0,
             finished: false,
             colors: GuyColors {
                 top: random_hue(),
@@ -78,6 +81,7 @@ impl Guy {
             best_progress: 0.0,
             best_time: None,
             touched_a_unicorn: false,
+            next_farticle: 0.0,
         }
     }
 }
@@ -117,7 +121,10 @@ fn load_custom_guy_assets(
 pub struct GuyAssets {
     pub cheeks: Texture,
     pub eyes: Texture,
+    pub closed_eyes: Texture,
     pub skin: Texture,
+    pub growl_top: Texture,
+    pub growl_bottom: Texture,
     pub clothes_top: Texture,
     pub clothes_bottom: Texture,
     pub hair: Texture,
