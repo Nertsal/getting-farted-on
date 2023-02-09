@@ -15,10 +15,10 @@ pub struct Game {
     pub best_time: Option<f32>,
     pub emotes: Vec<(f32, Id, usize)>,
     pub best_progress: f32,
-    pub framebuffer_size: Vec2<f32>,
-    pub prev_mouse_pos: Vec2<f64>,
+    pub framebuffer_size: vec2<f32>,
+    pub prev_mouse_pos: vec2<f64>,
     pub geng: Geng,
-    pub config: Config,
+    pub config: Rc<Config>,
     pub assets: Rc<Assets>,
     pub camera: geng::Camera2d,
     pub level: Level,
@@ -35,7 +35,7 @@ pub struct Game {
     pub volume: f32,
     pub client_id: Id,
     pub connection: Option<Connection>,
-    pub customization: Guy,
+    pub customization: CustomizationOptions,
     pub mute_music: bool,
     pub ui_controller: ui::Controller,
     pub buttons: Vec<ui::Button<UiMessage>>,
@@ -99,9 +99,9 @@ impl Game {
             config: assets.config.clone(),
             assets: assets.clone(),
             camera: geng::Camera2d {
-                center: Vec2::ZERO,
+                center: level.spawn_point,
                 rotation: 0.0,
-                fov: 5.0,
+                fov: assets.config.camera_fov,
             },
             framebuffer_size: vec2(1.0, 1.0),
             editor: if opt.editor {
@@ -113,8 +113,8 @@ impl Game {
             guys: Collection::new(),
             my_guy: None,
             real_time: 0.0,
-            noise: noise::OpenSimplex::new(),
-            prev_mouse_pos: Vec2::ZERO,
+            noise: noise::OpenSimplex::new(0),
+            prev_mouse_pos: vec2::ZERO,
             opt: opt.clone(),
             farticles: default(),
             volume: assets.config.volume,
@@ -123,13 +123,7 @@ impl Game {
             simulation_time: 0.0,
             remote_simulation_times: HashMap::new(),
             remote_updates: default(),
-            customization: {
-                let mut guy = Guy::new(-1, vec2(0.0, 0.0), false);
-                if opt.postjam {
-                    guy.postjam = true;
-                }
-                guy
-            },
+            customization: CustomizationOptions::random(),
             mute_music: false,
             best_progress: 0.0,
             ui_controller: ui::Controller::new(geng, assets),
@@ -141,13 +135,6 @@ impl Game {
                     0.7,
                     0.0,
                     UiMessage::RandomizeSkin,
-                ),
-                ui::Button::new(
-                    &format!("postjam ({})", if opt.postjam { "on" } else { "off" }),
-                    vec2(0.0, -4.0),
-                    0.7,
-                    0.5,
-                    UiMessage::TogglePostJam,
                 ),
             ],
             show_customizer: !opt.editor,
@@ -168,9 +155,12 @@ impl Game {
         };
         if !opt.editor {
             result.my_guy = Some(client_id);
-            result
-                .guys
-                .insert(Guy::new(client_id, result.level.spawn_point, true));
+            result.guys.insert(Guy::new(
+                client_id,
+                result.level.spawn_point,
+                true,
+                &result.config,
+            ));
         }
         result
     }
@@ -181,12 +171,12 @@ impl Game {
         }
         if let Some(id) = self.my_guy {
             let camera = geng::Camera2d {
-                center: Vec2::ZERO,
+                center: vec2::ZERO,
                 rotation: 0.0,
                 fov: 10.0,
             };
             let guy = self.guys.get_mut(&id).unwrap();
-            if guy.finished {
+            if guy.progress.finished {
                 self.assets.font.draw(
                     framebuffer,
                     &camera,
@@ -197,14 +187,14 @@ impl Game {
                     Rgba::BLACK,
                 );
             }
-            let progress = self.level.progress_at(guy.pos);
-            guy.progress = progress;
+            let progress = self.level.progress_at(guy.ball.pos);
+            guy.progress.current = progress;
             self.best_progress = self.best_progress.max(progress);
-            guy.best_progress = self.best_progress;
-            if guy.finished && self.simulation_time < self.best_time.unwrap_or(1e9) {
+            guy.progress.best = self.best_progress;
+            if guy.progress.finished && self.simulation_time < self.best_time.unwrap_or(1e9) {
                 self.best_time = Some(self.simulation_time);
             }
-            guy.best_time = self.best_time;
+            guy.progress.best_time = self.best_time;
             let mut time_text = String::new();
             let seconds = self.simulation_time.round() as i32;
             let minutes = seconds / 60;
@@ -240,7 +230,7 @@ impl Game {
                 framebuffer,
                 &camera,
                 &draw_2d::Quad::new(
-                    AABB::point(vec2(0.0, -4.5)).extend_symmetric(vec2(3.0, 0.1)),
+                    Aabb2::point(vec2(0.0, -4.5)).extend_symmetric(vec2(3.0, 0.1)),
                     Rgba::BLACK,
                 ),
             );
@@ -248,7 +238,7 @@ impl Game {
                 framebuffer,
                 &camera,
                 &draw_2d::Quad::new(
-                    AABB::point(vec2(-3.0 + 6.0 * self.best_progress, -4.5)).extend_uniform(0.3),
+                    Aabb2::point(vec2(-3.0 + 6.0 * self.best_progress, -4.5)).extend_uniform(0.3),
                     Rgba::new(0.0, 0.0, 0.0, 0.5),
                 ),
             );
@@ -256,7 +246,7 @@ impl Game {
                 framebuffer,
                 &camera,
                 &draw_2d::Quad::new(
-                    AABB::point(vec2(-3.0 + 6.0 * progress, -4.5)).extend_uniform(0.3),
+                    Aabb2::point(vec2(-3.0 + 6.0 * progress, -4.5)).extend_uniform(0.3),
                     Rgba::BLACK,
                 ),
             );
@@ -273,30 +263,38 @@ impl geng::State for Game {
         ugli::clear(framebuffer, Some(self.config.background_color), None, None);
 
         self.draw_level_back(&self.level, framebuffer);
-        test += &format!("lvl back {}\n", timer.tick());
+        // TODO: geng impl Display for time::Duration
+        test += &format!("lvl back {}\n", timer.tick().as_secs_f64());
         self.draw_guys(framebuffer);
-        test += &format!("guys {}\n", timer.tick());
+        test += &format!("guys {}\n", timer.tick().as_secs_f64());
         self.draw_level_front(&self.level, framebuffer);
-        test += &format!("lvl front {}\n", timer.tick());
+        test += &format!("lvl front {}\n", timer.tick().as_secs_f64());
         self.draw_farticles(framebuffer);
-        test += &format!("farticles {}\n", timer.tick());
+        test += &format!("farticles {}\n", timer.tick().as_secs_f64());
         self.draw_level_editor(framebuffer);
-        test += &format!("editor {}\n", timer.tick());
+        test += &format!("editor {}\n", timer.tick().as_secs_f64());
         self.draw_customizer(framebuffer);
-        test += &format!("customizer {}\n", timer.tick());
+        test += &format!("customizer {}\n", timer.tick().as_secs_f64());
         self.draw_leaderboard(framebuffer);
-        test += &format!("lb {}\n", timer.tick());
+        test += &format!("lb {}\n", timer.tick().as_secs_f64());
         self.draw_progress(framebuffer);
-        test += &format!("progress {}\n", timer.tick());
+        test += &format!("progress {}\n", timer.tick().as_secs_f64());
 
-        if timer1.elapsed() > 0.100 {
+        if timer1.elapsed().as_secs_f64() > 0.100 {
             println!("{}", test);
         }
     }
 
     fn fixed_update(&mut self, delta_time: f64) {
         let delta_time = delta_time as f32;
-        if self.my_guy.is_none() || !self.guys.get(&self.my_guy.unwrap()).unwrap().finished {
+        if self.my_guy.is_none()
+            || !self
+                .guys
+                .get(&self.my_guy.unwrap())
+                .unwrap()
+                .progress
+                .finished
+        {
             self.simulation_time += delta_time;
         }
         for time in self.remote_simulation_times.values_mut() {
@@ -319,7 +317,7 @@ impl geng::State for Game {
         if self.mute_music {
             self.new_music.set_volume(0.0);
             self.old_music.set_volume(0.0);
-        } else if self.customization.postjam {
+        } else if true {
             self.new_music.set_volume(self.volume as f64);
             self.old_music.set_volume(0.0);
         } else {
@@ -333,13 +331,13 @@ impl geng::State for Game {
         let mut target_center = self.camera.center;
         if let Some(id) = self.my_guy {
             let guy = self.guys.get(&id).unwrap();
-            target_center = guy.pos;
+            target_center = guy.ball.pos;
             if self.show_customizer {
                 target_center.x += 1.0;
             }
         } else if let Some(id) = self.follow {
             if let Some(guy) = self.guys.get(&id) {
-                target_center = guy.pos;
+                target_center = guy.ball.pos;
             }
         }
         self.camera.center += (target_center - self.camera.center) * (delta_time * 5.0).min(1.0);
@@ -358,9 +356,8 @@ impl geng::State for Game {
 
         if let Some(id) = self.my_guy {
             let guy = self.guys.get_mut(&id).unwrap();
-            guy.name = self.customization.name.clone();
-            guy.colors = self.customization.colors.clone();
-            guy.postjam = self.customization.postjam;
+            guy.customization.name = self.customization.name.clone();
+            guy.customization.colors = self.customization.colors.clone();
         }
     }
 
@@ -392,9 +389,9 @@ impl geng::State for Game {
                 if let Some(guy) = self
                     .guys
                     .iter()
-                    .min_by_key(|guy| r32((guy.pos - pos).len()))
+                    .min_by_key(|guy| r32((guy.ball.pos - pos).len()))
                 {
-                    if (guy.pos - pos).len() < self.assets.config.guy_radius {
+                    if (guy.ball.pos - pos).len() < guy.radius() {
                         self.follow = Some(guy.id);
                     }
                 }
@@ -406,7 +403,7 @@ impl geng::State for Game {
                 self.follow = None;
             }
             geng::Event::Wheel { delta } if self.opt.editor => {
-                self.camera.fov = (self.camera.fov * 1.01f32.powf(-delta as f32)).clamp(1.0, 30.0);
+                self.camera.fov = (self.camera.fov * 1.01f32.powf(-delta as f32)).clamp(1.0, 200.0);
             }
             geng::Event::KeyDown { key: geng::Key::R }
                 if self.geng.window().is_key_pressed(geng::Key::LCtrl) =>
@@ -420,9 +417,7 @@ impl geng::State for Game {
                 self.show_names = !self.show_names;
             }
             geng::Event::KeyDown { key: geng::Key::L } if !self.show_customizer => {
-                if self.customization.postjam {
-                    self.show_leaderboard = !self.show_leaderboard;
-                }
+                self.show_leaderboard = !self.show_leaderboard;
             }
             geng::Event::KeyDown {
                 key: geng::Key::Num1,
@@ -451,6 +446,16 @@ impl geng::State for Game {
                 if let Some(con) = &mut self.connection {
                     con.send(ClientMessage::Emote(3));
                 }
+            }
+            geng::Event::KeyDown {
+                key: geng::Key::Tab,
+            } if self.opt.editor => {
+                if self.editor.take().is_none() {
+                    self.editor = Some(EditorState::new(&self.geng, &self.assets));
+                }
+            }
+            geng::Event::KeyDown { key: geng::Key::I } => {
+                self.camera.fov = self.assets.config.camera_fov;
             }
             _ => {}
         }

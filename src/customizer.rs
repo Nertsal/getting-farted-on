@@ -4,7 +4,6 @@ use super::*;
 pub enum UiMessage {
     Play,
     RandomizeSkin,
-    TogglePostJam,
 }
 
 impl Game {
@@ -13,7 +12,7 @@ impl Game {
             return;
         }
         let camera = geng::Camera2d {
-            center: Vec2::ZERO,
+            center: vec2::ZERO,
             rotation: 0.0,
             fov: 10.0,
         };
@@ -61,36 +60,24 @@ impl Game {
                     self.show_customizer = false;
                 }
                 UiMessage::RandomizeSkin => {
-                    self.customization.colors = Guy::new(-1, Vec2::ZERO, true).colors;
-                }
-                UiMessage::TogglePostJam => {
-                    if self.customization.postjam {
-                        self.customization.postjam = false;
-                    } else {
-                        self.customization.postjam = true;
-                    }
-                    self.buttons
-                        .iter_mut()
-                        .find(|button| button.text.starts_with("postjam"))
-                        .unwrap()
-                        .text = format!(
-                        "postjam ({})",
-                        if self.customization.postjam {
-                            "on"
-                        } else {
-                            "off"
-                        }
-                    );
-
-                    self.respawn_my_guy();
+                    self.customization.colors = GuyColors::random();
                 }
             }
         }
         match event {
             geng::Event::KeyDown { key } => {
                 let s = format!("{:?}", key);
-                if s.len() == 1 && self.customization.name.len() < 15 {
-                    self.customization.name.push_str(&s);
+                let c = if s.len() == 1 {
+                    Some(s.as_str())
+                } else if let Some(num) = s.strip_prefix("Num") {
+                    Some(num)
+                } else {
+                    None
+                };
+                if let Some(c) = c {
+                    if self.customization.name.len() < 15 {
+                        self.customization.name.push_str(c);
+                    }
                 }
                 if *key == geng::Key::Backspace {
                     self.customization.name.pop();

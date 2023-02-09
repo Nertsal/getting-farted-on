@@ -2,23 +2,25 @@ use super::*;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Surface {
-    pub p1: Vec2<f32>,
-    pub p2: Vec2<f32>,
+    pub p1: vec2<f32>,
+    pub p2: vec2<f32>,
+    #[serde(default)]
+    pub flow: f32,
     pub type_name: String,
 }
 
 impl Surface {
-    pub fn vector_from(&self, point: Vec2<f32>) -> Vec2<f32> {
-        if Vec2::dot(point - self.p1, self.p2 - self.p1) < 0.0 {
+    pub fn vector_from(&self, point: vec2<f32>) -> vec2<f32> {
+        if vec2::dot(point - self.p1, self.p2 - self.p1) < 0.0 {
             return self.p1 - point;
         }
-        if Vec2::dot(point - self.p2, self.p1 - self.p2) < 0.0 {
+        if vec2::dot(point - self.p2, self.p1 - self.p2) < 0.0 {
             return self.p2 - point;
         }
         let n = (self.p2 - self.p1).rotate_90();
         // dot(point + n * t - p1, n) = 0
         // dot(point - p1, n) + dot(n, n) * t = 0
-        let t = Vec2::dot(self.p1 - point, n) / Vec2::dot(n, n);
+        let t = vec2::dot(self.p1 - point, n) / vec2::dot(n, n);
         n * t
     }
 }
@@ -31,6 +33,10 @@ pub struct SurfaceParams {
     #[serde(default)]
     pub min_bounce_vel: f32,
     pub friction: f32,
+    #[serde(default)]
+    pub speed_friction: f32,
+    #[serde(default)]
+    pub rotation_friction: f32,
     pub front: bool,
     pub back: bool,
     pub sound: bool,
@@ -40,6 +46,11 @@ pub struct SurfaceParams {
     pub flex_amplitude: f32,
     #[serde(default)]
     pub texture_speed: f32,
+    #[serde(default)]
+    pub stick_strength: f32,
+    #[serde(default)]
+    pub max_stick_force: f32,
+    pub fallthrough_speed: Option<f32>,
 }
 
 pub struct SurfaceAssets {

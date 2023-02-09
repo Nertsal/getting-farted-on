@@ -17,7 +17,8 @@ impl EditorToolConfig for SurfaceToolConfig {
 pub struct SurfaceTool {
     geng: Geng,
     assets: Rc<Assets>,
-    start_drag: Option<Vec2<f32>>,
+    start_drag: Option<vec2<f32>>,
+    wind_drag: Option<(usize, vec2<f32>)>,
     config: SurfaceToolConfig,
 }
 impl SurfaceTool {
@@ -41,6 +42,7 @@ impl EditorTool for SurfaceTool {
             geng: geng.clone(),
             assets: assets.clone(),
             start_drag: None,
+            wind_drag: None,
             config,
         }
     }
@@ -56,7 +58,7 @@ impl EditorTool for SurfaceTool {
             self.geng.draw_2d(
                 framebuffer,
                 camera,
-                &draw_2d::Segment::new(Segment::new(p1, p2), 0.1, Rgba::new(1.0, 1.0, 1.0, 0.5)),
+                &draw_2d::Segment::new(Segment(p1, p2), 0.1, Rgba::new(1.0, 1.0, 1.0, 0.5)),
             );
         } else if let Some(index) = self.find_hovered_surface(cursor, level) {
             let surface = &level.surfaces[index];
@@ -64,7 +66,18 @@ impl EditorTool for SurfaceTool {
                 framebuffer,
                 camera,
                 &draw_2d::Segment::new(
-                    Segment::new(surface.p1, surface.p2),
+                    Segment(surface.p1, surface.p2),
+                    0.2,
+                    Rgba::new(1.0, 0.0, 0.0, 0.5),
+                ),
+            );
+        }
+        if let Some((_, start)) = self.wind_drag {
+            self.geng.draw_2d(
+                framebuffer,
+                camera,
+                &draw_2d::Segment::new(
+                    Segment(start, cursor.world_pos),
                     0.2,
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
                 ),
@@ -89,6 +102,7 @@ impl EditorTool for SurfaceTool {
                         level.modify().surfaces.push(Surface {
                             p1,
                             p2,
+                            flow: 0.0,
                             type_name: self.config.selected_type.clone(),
                         });
                     }
@@ -100,6 +114,24 @@ impl EditorTool for SurfaceTool {
             } => {
                 if let Some(index) = self.find_hovered_surface(cursor, level) {
                     level.modify().surfaces.remove(index);
+                }
+            }
+
+            geng::Event::KeyDown { key: geng::Key::W } => {
+                if self.wind_drag.is_none() {
+                    self.wind_drag = self
+                        .find_hovered_surface(cursor, level)
+                        .map(|index| (index, cursor.world_pos));
+                }
+            }
+            geng::Event::KeyUp { key: geng::Key::W } => {
+                if let Some((index, start)) = self.wind_drag.take() {
+                    let level = level.modify();
+                    let surface = &mut level.surfaces[index];
+                    surface.flow = vec2::dot(
+                        cursor.world_pos - start,
+                        (surface.p2 - surface.p1).normalize_or_zero(),
+                    );
                 }
             }
             _ => {}

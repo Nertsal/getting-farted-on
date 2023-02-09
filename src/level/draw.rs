@@ -2,15 +2,16 @@ use super::*;
 
 #[derive(ugli::Vertex)]
 struct TileVertex {
-    a_pos: Vec2<f32>,
-    a_flow: Vec2<f32>,
+    a_pos: vec2<f32>,
+    a_flow: vec2<f32>,
 }
 
 #[derive(ugli::Vertex, Copy, Clone)]
 struct SurfaceVertex {
-    a_pos: Vec2<f32>,
-    a_normal: Vec2<f32>,
-    a_vt: Vec2<f32>,
+    a_pos: vec2<f32>,
+    a_normal: vec2<f32>,
+    a_vt: vec2<f32>,
+    a_flow: f32,
 }
 
 pub struct LevelMesh {
@@ -46,21 +47,25 @@ impl LevelMesh {
                             SurfaceVertex {
                                 a_pos: surface.p1,
                                 a_normal: normal,
+                                a_flow: surface.flow,
                                 a_vt: vec2(0.0, 0.0),
                             },
                             SurfaceVertex {
                                 a_pos: surface.p2,
                                 a_normal: normal,
+                                a_flow: surface.flow,
                                 a_vt: vec2(len, 0.0),
                             },
                             SurfaceVertex {
                                 a_pos: surface.p2,
                                 a_normal: normal,
+                                a_flow: surface.flow,
                                 a_vt: vec2(len, 1.0),
                             },
                             SurfaceVertex {
                                 a_pos: surface.p1,
                                 a_normal: normal,
+                                a_flow: surface.flow,
                                 a_vt: vec2(0.0, 1.0),
                             },
                         ];
@@ -118,7 +123,7 @@ impl Game {
                     geng::camera2d_uniforms(&self.camera, self.framebuffer_size),
                 ),
                 ugli::DrawParameters {
-                    blend_mode: Some(ugli::BlendMode::default()),
+                    blend_mode: Some(ugli::BlendMode::straight_alpha()),
                     ..default()
                 },
             );
@@ -149,9 +154,39 @@ impl Game {
                     geng::camera2d_uniforms(&self.camera, self.framebuffer_size),
                 ),
                 ugli::DrawParameters {
-                    blend_mode: Some(ugli::BlendMode::default()),
+                    blend_mode: Some(ugli::BlendMode::straight_alpha()),
                     ..default()
                 },
+            );
+        }
+    }
+
+    pub fn draw_cannons(&self, level: &Level, framebuffer: &mut ugli::Framebuffer) {
+        for cannon in &level.cannons {
+            self.geng.draw_2d(
+                framebuffer,
+                &self.camera,
+                &draw_2d::TexturedQuad::unit(&self.assets.cannon.body)
+                    .rotate(cannon.rot)
+                    .translate(cannon.pos),
+            );
+            self.geng.draw_2d(
+                framebuffer,
+                &self.camera,
+                &draw_2d::TexturedQuad::unit(&self.assets.cannon.base).translate(cannon.pos),
+            );
+        }
+    }
+
+    pub fn draw_portals(&self, level: &Level, framebuffer: &mut ugli::Framebuffer) {
+        for portal in &level.portals {
+            self.geng.draw_2d(
+                framebuffer,
+                &self.camera,
+                &draw_2d::TexturedQuad::unit_colored(&self.assets.portal, portal.color)
+                    .scale_uniform(self.config.portal.size)
+                    .rotate(self.real_time)
+                    .translate(portal.pos),
             );
         }
     }
@@ -174,7 +209,7 @@ impl Game {
                     framebuffer,
                     &self.camera,
                     &draw_2d::TexturedQuad::unit(&self.assets.objects[&obj.type_name])
-                        .transform(Mat3::rotate(if obj.type_name == "unicorn" {
+                        .transform(mat3::rotate(if obj.type_name == "unicorn" {
                             self.real_time
                         } else {
                             0.0
@@ -191,6 +226,7 @@ impl Game {
             43756.0,
             1.0,
         );
+        self.draw_portals(level, framebuffer);
     }
 
     pub fn draw_level_front(&self, level: &Level, framebuffer: &mut ugli::Framebuffer) {
@@ -202,5 +238,6 @@ impl Game {
             -123.0,
             -1.0,
         );
+        self.draw_cannons(level, framebuffer);
     }
 }

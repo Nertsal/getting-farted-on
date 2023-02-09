@@ -5,9 +5,9 @@ mod tools;
 use tools::*;
 
 pub struct Cursor {
-    pub screen_pos: Vec2<f32>,
-    pub world_pos: Vec2<f32>,
-    pub snapped_world_pos: Vec2<f32>,
+    pub screen_pos: vec2<f32>,
+    pub world_pos: vec2<f32>,
+    pub snapped_world_pos: vec2<f32>,
 }
 
 pub struct EditorState {
@@ -22,19 +22,22 @@ pub struct EditorState {
 impl EditorState {
     pub fn new(geng: &Geng, assets: &Rc<Assets>) -> Self {
         let available_tools = vec![
+            tool_constructor::<EditTool>(geng, assets),
             tool_constructor::<SurfaceTool>(geng, assets),
             tool_constructor::<TileTool>(geng, assets),
             tool_constructor::<ObjectTool>(geng, assets),
             tool_constructor::<EndpointTool>(geng, assets),
             tool_constructor::<ProgressTool>(geng, assets),
+            tool_constructor::<CannonTool>(geng, assets),
+            tool_constructor::<PortalTool>(geng, assets),
         ];
         let selected_tool_index = 0;
         Self {
             geng: geng.clone(),
             cursor: Cursor {
-                screen_pos: Vec2::ZERO,
-                world_pos: Vec2::ZERO,
-                snapped_world_pos: Vec2::ZERO,
+                screen_pos: vec2::ZERO,
+                world_pos: vec2::ZERO,
+                snapped_world_pos: vec2::ZERO,
             },
             next_autosave: 0.0,
             selected_tool_index,
@@ -53,7 +56,7 @@ impl EditorState {
     pub fn save_level(&self, level: &Level) {
         #[cfg(not(target_arch = "wasm32"))]
         serde_json::to_writer_pretty(
-            std::fs::File::create(static_path().join("level.json")).unwrap(),
+            std::fs::File::create(run_dir().join("assets").join("level.json")).unwrap(),
             level.info(),
         )
         .unwrap();
@@ -62,7 +65,7 @@ impl EditorState {
 }
 
 impl Game {
-    pub fn snapped_cursor_position(&self, level: &Level) -> Vec2<f32> {
+    pub fn snapped_cursor_position(&self, level: &Level) -> vec2<f32> {
         self.snap_position(
             level,
             self.camera.screen_to_world(
@@ -72,7 +75,7 @@ impl Game {
         )
     }
 
-    pub fn snap_position(&self, level: &Level, pos: Vec2<f32>) -> Vec2<f32> {
+    pub fn snap_position(&self, level: &Level, pos: vec2<f32>) -> vec2<f32> {
         let closest_point = itertools::chain![
             level
                 .surfaces
@@ -94,7 +97,7 @@ impl Game {
                 framebuffer,
                 &self.camera,
                 &draw_2d::Quad::new(
-                    AABB::point(self.snapped_cursor_position(&self.level)).extend_uniform(0.1),
+                    Aabb2::point(self.snapped_cursor_position(&self.level)).extend_uniform(0.1),
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
                 ),
             );
@@ -127,7 +130,7 @@ impl Game {
                         (editor.selected_tool_index + 1) % editor.available_tools.len();
                     editor.tool = editor.available_tools[editor.selected_tool_index].create();
                 }
-                geng::Key::R => {
+                geng::Key::Q => {
                     if !self.geng.window().is_key_pressed(geng::Key::LCtrl) {
                         if let Some(id) = self.my_guy.take() {
                             if let Some(con) = &mut self.connection {
@@ -136,8 +139,12 @@ impl Game {
                             self.guys.remove(&id);
                         } else {
                             self.my_guy = Some(self.client_id);
-                            self.guys
-                                .insert(Guy::new(self.client_id, cursor_pos, false));
+                            self.guys.insert(Guy::new(
+                                self.client_id,
+                                cursor_pos,
+                                false,
+                                &self.config,
+                            ));
                         }
                     }
                 }

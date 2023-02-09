@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(geng::Assets)]
 pub struct Assets {
-    pub config: Config,
+    pub config: Rc<Config>,
     pub sfx: SfxAssets,
     pub guy: GuyAssets,
     #[asset(load_with = "load_surface_assets(&geng, &base_path.join(\"surfaces\"))")]
@@ -22,12 +22,38 @@ pub struct Assets {
     )]
     pub emotes: Vec<Texture>,
     pub shaders: Shaders,
+    pub cannon: CannonAssets,
+    pub portal: Texture,
+    pub bubble: Texture,
 }
 
 #[derive(geng::Assets)]
 pub struct Shaders {
     pub tile: ugli::Program,
     pub surface: ugli::Program,
+}
+
+#[derive(geng::Assets)]
+pub struct CannonAssets {
+    pub body: Texture,
+    pub base: Texture,
+    pub shot: geng::Sound,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct CannonConfig {
+    pub strength: f32,
+    pub activate_distance: f32,
+    pub shoot_time: f32,
+    pub particle_size: f32,
+    pub particle_count: usize,
+    pub particle_color: Rgba<f32>,
+    pub particle_speed: f32,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct PortalConfig {
+    pub size: f32,
 }
 
 #[derive(geng::Assets, Deserialize, Clone, Debug)]
@@ -57,6 +83,19 @@ pub struct Config {
     pub farticle_count: usize,
     pub farticle_additional_vel: f32,
     pub background_color: Rgba<f32>,
+    pub max_snow_layer: f32,
+    pub snow_falloff_impulse_min: f32,
+    pub snow_falloff_impulse_max: f32,
+    pub snow_density: f32,
+    pub cannon: CannonConfig,
+    pub portal: PortalConfig,
+    pub stick_force_fadeout_speed: f32,
+    pub max_penetration: f32,
+    pub bubble_time: f32,
+    pub bubble_scale: f32,
+    pub bubble_acceleration: f32,
+    pub bubble_target_speed: f32,
+    pub camera_fov: f32,
 }
 
 #[derive(geng::Assets)]
@@ -86,14 +125,14 @@ fn load_font(geng: &Geng, path: &std::path::Path) -> geng::AssetFuture<geng::Fon
     let path = path.to_owned();
     async move {
         let data = <Vec<u8> as geng::LoadAsset>::load(&geng, &path).await?;
-        Ok(geng::Font::new(
+        geng::Font::new(
             &geng,
             &data,
             geng::ttf::Options {
                 pixel_size: 64.0,
                 max_distance: 0.1,
             },
-        )?)
+        )
     }
     .boxed_local()
 }

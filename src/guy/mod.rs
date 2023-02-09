@@ -8,27 +8,80 @@ pub struct Input {
     pub force_fart: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, HasId)]
-pub struct Guy {
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CustomizationOptions {
     pub name: String,
-    pub colliding_water: bool,
-    pub growl_progress: Option<f32>,
-    pub id: Id,
-    pub pos: Vec2<f32>,
-    pub vel: Vec2<f32>,
+    pub colors: GuyColors,
+}
+
+impl CustomizationOptions {
+    pub fn random() -> Self {
+        Self {
+            name: "".to_owned(),
+            colors: GuyColors::random(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Progress {
+    pub finished: bool,
+    pub current: f32,
+    pub best: f32,
+    pub best_time: Option<f32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Ball {
+    pub radius: f32,
+    pub pos: vec2<f32>,
+    pub vel: vec2<f32>,
     pub rot: f32,
     pub w: f32,
-    pub farting: bool,
-    pub input: Input,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FartState {
+    pub long_farting: bool,
     pub fart_pressure: f32,
-    pub finished: bool,
-    pub colors: GuyColors,
-    pub postjam: bool,
-    pub progress: f32,
-    pub best_progress: f32,
-    pub best_time: Option<f32>,
-    pub next_farticle: f32,
+}
+
+impl Default for FartState {
+    fn default() -> Self {
+        Self {
+            long_farting: false,
+            fart_pressure: 0.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GuyAnimationState {
+    pub growl_progress: Option<f32>,
+    pub next_farticle_time: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, HasId)]
+pub struct Guy {
+    pub id: Id,
+    pub customization: CustomizationOptions,
+    pub ball: Ball,
+    pub fart_state: FartState,
+    pub input: Input,
+    pub animation: GuyAnimationState,
+    pub progress: Progress,
+
     pub touched_a_unicorn: bool,
+    pub snow_layer: f32,
+    pub cannon_timer: Option<CannonTimer>,
+    pub stick_force: vec2<f32>,
+    pub bubble_timer: Option<f32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CannonTimer {
+    pub cannon_index: usize,
+    pub time: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -39,50 +92,68 @@ pub struct GuyColors {
     pub skin: Rgba<f32>,
 }
 
-impl Guy {
-    pub fn new(id: Id, pos: Vec2<f32>, rng: bool) -> Self {
-        let random_hue = || {
-            let hue = global_rng().gen_range(0.0..1.0);
-            Hsva::new(hue, 1.0, 1.0, 1.0).into()
-        };
+impl GuyColors {
+    pub fn random() -> Self {
         Self {
-            farting: false,
-            growl_progress: None,
-            colliding_water: false,
-            name: "".to_owned(),
-            id,
-            pos: pos
-                + if rng {
-                    vec2(global_rng().gen_range(-1.0..=1.0), 0.0)
-                } else {
-                    Vec2::ZERO
-                },
-            vel: Vec2::ZERO,
-            rot: if rng {
-                global_rng().gen_range(-1.0..=1.0)
-            } else {
-                0.0
+            top: random_hue(),
+            bottom: random_hue(),
+            hair: random_hue(),
+            skin: {
+                let tone = thread_rng().gen_range(0.5..1.0);
+                Rgba::new(tone, tone, tone, 1.0)
             },
-            w: 0.0,
-            input: Input::default(),
-            fart_pressure: 0.0,
-            finished: false,
-            colors: GuyColors {
-                top: random_hue(),
-                bottom: random_hue(),
-                hair: random_hue(),
-                skin: {
-                    let tone = global_rng().gen_range(0.5..1.0);
-                    Rgba::new(tone, tone, tone, 1.0)
-                },
-            },
-            postjam: false,
-            progress: 0.0,
-            best_progress: 0.0,
-            best_time: None,
-            touched_a_unicorn: false,
-            next_farticle: 0.0,
         }
+    }
+}
+
+impl Guy {
+    pub fn new(id: Id, pos: vec2<f32>, rng: bool, config: &Config) -> Self {
+        Self {
+            id,
+            customization: CustomizationOptions::random(),
+            ball: Ball {
+                radius: config.guy_radius,
+                pos: pos
+                    + if rng {
+                        vec2(thread_rng().gen_range(-1.0..=1.0), 0.0)
+                    } else {
+                        vec2::ZERO
+                    },
+                vel: vec2::ZERO,
+                rot: if rng {
+                    thread_rng().gen_range(-1.0..=1.0)
+                } else {
+                    0.0
+                },
+                w: 0.0,
+            },
+            snow_layer: 0.0,
+            fart_state: default(),
+            input: Input::default(),
+            progress: Progress {
+                finished: false,
+                current: 0.0,
+                best: 0.0,
+                best_time: None,
+            },
+            animation: GuyAnimationState {
+                growl_progress: None,
+                next_farticle_time: 0.0,
+            },
+
+            touched_a_unicorn: false,
+            cannon_timer: None,
+            stick_force: vec2::ZERO,
+            bubble_timer: None,
+        }
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.ball.radius + self.snow_layer
+    }
+
+    pub fn mass(&self, config: &Config) -> f32 {
+        1.0 + self.snow_layer * config.snow_density
     }
 }
 
@@ -90,6 +161,7 @@ impl Guy {
 pub struct CustomGuyAssets {
     pub body: Texture,
     pub eyes: Texture,
+    pub closed_eyes: Texture,
     pub cheeks: Texture,
 }
 

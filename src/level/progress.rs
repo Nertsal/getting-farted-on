@@ -1,7 +1,7 @@
 use super::*;
 
 impl Level {
-    pub fn progress_at(&self, pos: Vec2<f32>) -> f32 {
+    pub fn progress_at(&self, pos: vec2<f32>) -> f32 {
         let mut total_len = 0.0;
         for window in self.expected_path.windows(2) {
             let a = window[0];
@@ -17,6 +17,7 @@ impl Level {
             let v = Surface {
                 p1: a,
                 p2: b,
+                flow: 0.0,
                 type_name: String::new(),
             }
             .vector_from(pos);
