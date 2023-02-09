@@ -11,10 +11,29 @@ pub struct Tas<T: Tasable> {
     time_scale: f64,
     /// The expected time between fixed updates.
     fixed_delta_time: f64,
-    /// The time until next the fixed update (if queued).
+    /// The time until the next fixed update (if queued).
     next_fixed_update: Option<f64>,
     /// All saved states.
-    saved_states: Vec<T::Saved>,
+    saved_states: Vec<SaveState<T::Saved>>,
+    /// Current simulation (not real) time.
+    time: f64,
+    /// History of all inputs.
+    inputs: Vec<TickInput>,
+    save_file: String,
+    replay: Option<f64>,
+}
+
+#[derive(Debug, Clone)] // , Serialize, Deserialize)]
+struct TickInput {
+    time: f64,
+    event: geng::Event,
+}
+
+#[derive(Clone)]
+struct SaveState<S> {
+    time: f64,
+    inputs: Vec<TickInput>,
+    state: S,
 }
 
 /// Holds the implementation details of the game to be TAS'ed.
@@ -39,12 +58,20 @@ impl<T: Tasable> Tas<T> {
             fixed_delta_time: 1.0,
             next_fixed_update: None,
             saved_states: Vec::new(),
+            time: 0.0,
+            inputs: Vec::new(),
+            save_file: "tas.json".to_string(),
+            replay: None,
         }
     }
 
     /// Saves the current game state.
     fn save_state(&mut self) {
-        self.saved_states.push(self.game.save());
+        self.saved_states.push(SaveState {
+            time: self.time,
+            inputs: self.inputs.clone(),
+            state: self.game.save(),
+        });
     }
 
     /// Attempts to load the saved state by index.
@@ -52,34 +79,33 @@ impl<T: Tasable> Tas<T> {
     fn load_state(&mut self, index: usize) {
         // Get the state by index
         if let Some(state) = self.saved_states.get(index) {
-            self.game.load(state.clone());
+            let state = state.clone();
+            self.time = state.time;
+            self.inputs = state.inputs;
+            self.game.load(state.state);
         }
     }
 
-    /// Changes the time scale by the given `delta`.
-    /// The final time scale is clamped between 0 and 2.
-    fn change_time_scale(&mut self, delta: f64) {
-        self.set_time_scale(self.time_scale + delta);
+    /// Saves the run in a file.
+    fn save_run(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        // serde_json::to_writer_pretty(writer, &self.inputs)?;
+        Ok(())
     }
 
-    /// Set the time scale to the given `value` clamped between 0 and 2.
-    fn set_time_scale(&mut self, value: f64) {
-        self.time_scale = value.clamp(0.0, 2.0);
-    }
-
-    /// Handle the `geng::KeyDown { key: geng::Key::Num<num> }` event.
-    fn num_down(&mut self, mut num: usize) {
-        if num == 0 {
-            num = 10;
-        }
-        if self.geng.window().is_key_pressed(geng::Key::L) {
-            // Load state
-            num -= 1;
-            self.load_state(num);
-        } else {
-            // Set time scale
-            self.set_time_scale(num as f64 * 0.1);
-        }
+    /// Loads the run from the file.
+    fn load_run(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        // self.inputs = serde_json::from_reader(reader)?;
+        Ok(())
     }
 }
 
@@ -117,31 +143,16 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
         let window = self.geng.window();
         if window.is_key_pressed(geng::Key::LAlt) {
             // Capture the event
-            match event {
-                geng::Event::Wheel { delta } => {
-                    self.change_time_scale(delta * 0.002);
-                }
-                geng::Event::KeyDown { key } => match key {
-                    geng::Key::F1 => self.show_ui = !self.show_ui,
-                    geng::Key::Num0 => self.num_down(0),
-                    geng::Key::Num1 => self.num_down(1),
-                    geng::Key::Num2 => self.num_down(2),
-                    geng::Key::Num3 => self.num_down(3),
-                    geng::Key::Num4 => self.num_down(4),
-                    geng::Key::Num5 => self.num_down(5),
-                    geng::Key::Num6 => self.num_down(6),
-                    geng::Key::Num7 => self.num_down(7),
-                    geng::Key::Num8 => self.num_down(8),
-                    geng::Key::Num9 => self.num_down(9),
-                    geng::Key::S => self.save_state(),
-                    geng::Key::L => self.load_state(self.saved_states.len() - 1),
-                    _ => {}
-                },
-                _ => {}
+            if let geng::Event::KeyDown { key: geng::Key::S } = event {
+                self.save_run("tas.json").unwrap();
             }
             return;
         }
 
+        self.inputs.push(TickInput {
+            time: self.time,
+            event: event.clone(),
+        });
         self.game.handle_event(event);
     }
 
@@ -196,7 +207,7 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
         let tas_ui = stack![
             column![
                 {
-                    let time_slider = self::Slider::new(ui, self.time_scale, 0.0..=2.0);
+                    let time_slider = slider::Slider::new(ui, self.time_scale, 0.0..=2.0);
                     if let Some(value) = time_slider.get_change() {
                         self.time_scale = value;
                     }
@@ -211,6 +222,35 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                 .center()
             ]
             .align(vec2(0.5, 1.0)),
+            column![
+                Text::new(
+                    self.save_file.clone(),
+                    self.geng.default_font().clone(),
+                    40.0,
+                    Rgba::BLACK
+                ),
+                row![
+                    {
+                        let save_run = Button::new(ui, "Save run");
+                        if save_run.was_clicked() {
+                            if let Err(err) = self.save_run(&self.save_file) {
+                                error!("Failed to save run: {err}");
+                            }
+                        }
+                        save_run
+                    },
+                    {
+                        let load_run = Button::new(ui, "Load run");
+                        if load_run.was_clicked() {
+                            if let Err(err) = self.load_run(&self.save_file.clone()) {
+                                error!("Failed to load run: {err}");
+                            }
+                        }
+                        load_run
+                    }
+                ]
+            ]
+            .align(vec2(0.0, 0.0)),
             column({
                 saved_states.push(Box::new({
                     let new_save = Button::new(ui, "Save state");
@@ -229,139 +269,141 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
     }
 }
 
-pub struct Slider<'a> {
-    cx: &'a geng::ui::Controller,
-    sense: &'a mut geng::ui::Sense,
-    pos: &'a mut Option<AABB<f64>>,
-    tick_radius: &'a mut f32,
-    value: f64,
-    range: RangeInclusive<f64>,
-    change: RefCell<&'a mut Option<f64>>,
-}
+mod slider {
+    use super::*;
+    use geng::ui::*;
 
-impl<'a> Slider<'a> {
-    const ANIMATION_SPEED: f32 = 5.0;
-
-    pub fn new(cx: &'a geng::ui::Controller, value: f64, range: RangeInclusive<f64>) -> Self {
-        Slider {
-            cx,
-            sense: cx.get_state(),
-            tick_radius: cx.get_state(),
-            pos: cx.get_state(),
-            value,
-            range,
-            change: RefCell::new(cx.get_state()),
-        }
+    pub struct Slider<'a> {
+        cx: &'a Controller,
+        sense: &'a mut Sense,
+        pos: &'a mut Option<AABB<f64>>,
+        tick_radius: &'a mut f32,
+        value: f64,
+        range: RangeInclusive<f64>,
+        change: RefCell<&'a mut Option<f64>>,
     }
 
-    pub fn get_change(&self) -> Option<f64> {
-        self.change.borrow_mut().take()
-    }
-}
+    impl<'a> Slider<'a> {
+        const ANIMATION_SPEED: f32 = 5.0;
 
-impl<'a> geng::ui::Widget for Slider<'a> {
-    fn sense(&mut self) -> Option<&mut geng::ui::Sense> {
-        Some(self.sense)
-    }
-    fn update(&mut self, delta_time: f64) {
-        let target_tick_radius = if self.sense.is_hovered() || self.sense.is_captured() {
-            1.0 / 2.0
-        } else {
-            1.0 / 6.0
-        };
-        *self.tick_radius += (target_tick_radius - *self.tick_radius)
-            .clamp_abs(Self::ANIMATION_SPEED * delta_time as f32);
-    }
-    fn draw(&mut self, cx: &mut geng::ui::DrawContext) {
-        *self.pos = Some(cx.position);
-        let geng = cx.geng;
-        let draw_2d = geng.draw_2d_helper();
-        let position = cx.position.map(|x| x as f32);
-        let line_width = position.height() / 3.0;
-        let value_position = if self.range.end() == self.range.start() {
-            *self.tick_radius
-        } else {
-            *self.tick_radius
-                + ((self.value - *self.range.start()) / (*self.range.end() - *self.range.start()))
-                    as f32
-                    * (position.width() - line_width)
-        };
-        geng.draw_2d(
-            cx.framebuffer,
-            &geng::PixelPerfectCamera,
-            &draw_2d::Quad::new(
-                AABB::from_corners(
-                    position.bottom_left()
-                        + vec2(value_position, (position.height() - line_width) / 2.0),
-                    position.top_right()
-                        - vec2(line_width / 2.0, (position.height() - line_width) / 2.0),
-                ),
-                cx.theme.usable_color,
-            ),
-        );
-        draw_2d.circle(
-            cx.framebuffer,
-            &geng::PixelPerfectCamera,
-            position.top_right() - vec2(line_width / 2.0, position.height() / 2.0),
-            line_width / 2.0,
-            cx.theme.usable_color,
-        );
-        geng.draw_2d(
-            cx.framebuffer,
-            &geng::PixelPerfectCamera,
-            &draw_2d::Quad::new(
-                AABB::from_corners(
-                    position.bottom_left()
-                        + vec2(line_width / 2.0, (position.height() - line_width) / 2.0),
-                    position.bottom_left()
-                        + vec2(value_position, (position.height() + line_width) / 2.0),
-                ),
-                cx.theme.hover_color,
-            ),
-        );
-        geng.draw_2d(
-            cx.framebuffer,
-            &geng::PixelPerfectCamera,
-            &draw_2d::Ellipse::circle(
-                position.bottom_left() + vec2(line_width / 2.0, position.height() / 2.0),
-                line_width / 2.0,
-                cx.theme.hover_color,
-            ),
-        );
-        draw_2d.circle(
-            cx.framebuffer,
-            &geng::PixelPerfectCamera,
-            position.bottom_left() + vec2(value_position, position.height() / 2.0),
-            *self.tick_radius * position.height(),
-            cx.theme.hover_color,
-        );
-    }
-    fn handle_event(&mut self, event: &geng::Event) {
-        let aabb = match *self.pos {
-            Some(pos) => pos,
-            None => return,
-        };
-        if self.sense.is_captured() {
-            if let geng::Event::MouseDown { position, .. }
-            | geng::Event::MouseMove { position, .. } = &event
-            {
-                let position = position.x - aabb.x_min;
-                let new_value = *self.range.start()
-                    + ((position - aabb.height() / 6.0) / (aabb.width() - aabb.height() / 3.0))
-                        .clamp(0.0, 1.0)
-                        * (*self.range.end() - *self.range.start());
-                **self.change.borrow_mut() = Some(new_value);
+        pub fn new(cx: &'a Controller, value: f64, range: RangeInclusive<f64>) -> Self {
+            Slider {
+                cx,
+                sense: cx.get_state(),
+                tick_radius: cx.get_state(),
+                pos: cx.get_state(),
+                value,
+                range,
+                change: RefCell::new(cx.get_state()),
             }
         }
+
+        pub fn get_change(&self) -> Option<f64> {
+            self.change.borrow_mut().take()
+        }
     }
 
-    fn calc_constraints(
-        &mut self,
-        _children: &geng::ui::ConstraintsContext,
-    ) -> geng::ui::Constraints {
-        geng::ui::Constraints {
-            min_size: vec2(1.0, 1.0) * self.cx.theme().text_size as f64,
-            flex: vec2(1.0, 0.0),
+    impl<'a> Widget for Slider<'a> {
+        fn sense(&mut self) -> Option<&mut Sense> {
+            Some(self.sense)
+        }
+        fn update(&mut self, delta_time: f64) {
+            let target_tick_radius = if self.sense.is_hovered() || self.sense.is_captured() {
+                1.0 / 2.0
+            } else {
+                1.0 / 6.0
+            };
+            *self.tick_radius += (target_tick_radius - *self.tick_radius)
+                .clamp_abs(Self::ANIMATION_SPEED * delta_time as f32);
+        }
+        fn draw(&mut self, cx: &mut DrawContext) {
+            *self.pos = Some(cx.position);
+            let geng = cx.geng;
+            let draw_2d = geng.draw_2d_helper();
+            let position = cx.position.map(|x| x as f32);
+            let line_width = position.height() / 3.0;
+            let value_position = if self.range.end() == self.range.start() {
+                *self.tick_radius
+            } else {
+                *self.tick_radius
+                    + ((self.value - *self.range.start())
+                        / (*self.range.end() - *self.range.start())) as f32
+                        * (position.width() - line_width)
+            };
+            geng.draw_2d(
+                cx.framebuffer,
+                &geng::PixelPerfectCamera,
+                &draw_2d::Quad::new(
+                    AABB::from_corners(
+                        position.bottom_left()
+                            + vec2(value_position, (position.height() - line_width) / 2.0),
+                        position.top_right()
+                            - vec2(line_width / 2.0, (position.height() - line_width) / 2.0),
+                    ),
+                    cx.theme.usable_color,
+                ),
+            );
+            draw_2d.circle(
+                cx.framebuffer,
+                &geng::PixelPerfectCamera,
+                position.top_right() - vec2(line_width / 2.0, position.height() / 2.0),
+                line_width / 2.0,
+                cx.theme.usable_color,
+            );
+            geng.draw_2d(
+                cx.framebuffer,
+                &geng::PixelPerfectCamera,
+                &draw_2d::Quad::new(
+                    AABB::from_corners(
+                        position.bottom_left()
+                            + vec2(line_width / 2.0, (position.height() - line_width) / 2.0),
+                        position.bottom_left()
+                            + vec2(value_position, (position.height() + line_width) / 2.0),
+                    ),
+                    cx.theme.hover_color,
+                ),
+            );
+            geng.draw_2d(
+                cx.framebuffer,
+                &geng::PixelPerfectCamera,
+                &draw_2d::Ellipse::circle(
+                    position.bottom_left() + vec2(line_width / 2.0, position.height() / 2.0),
+                    line_width / 2.0,
+                    cx.theme.hover_color,
+                ),
+            );
+            draw_2d.circle(
+                cx.framebuffer,
+                &geng::PixelPerfectCamera,
+                position.bottom_left() + vec2(value_position, position.height() / 2.0),
+                *self.tick_radius * position.height(),
+                cx.theme.hover_color,
+            );
+        }
+        fn handle_event(&mut self, event: &geng::Event) {
+            let aabb = match *self.pos {
+                Some(pos) => pos,
+                None => return,
+            };
+            if self.sense.is_captured() {
+                if let geng::Event::MouseDown { position, .. }
+                | geng::Event::MouseMove { position, .. } = &event
+                {
+                    let position = position.x - aabb.x_min;
+                    let new_value = *self.range.start()
+                        + ((position - aabb.height() / 6.0) / (aabb.width() - aabb.height() / 3.0))
+                            .clamp(0.0, 1.0)
+                            * (*self.range.end() - *self.range.start());
+                    **self.change.borrow_mut() = Some(new_value);
+                }
+            }
+        }
+
+        fn calc_constraints(&mut self, _children: &ConstraintsContext) -> Constraints {
+            Constraints {
+                min_size: vec2(1.0, 1.0) * self.cx.theme().text_size as f64,
+                flex: vec2(1.0, 0.0),
+            }
         }
     }
 }
