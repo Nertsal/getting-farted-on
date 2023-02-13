@@ -56,15 +56,37 @@ impl Drop for Game {
     }
 }
 
-impl tas::Tasable for Game {
-    type Saved = Option<Guy>;
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Saved {
+    camera: geng::Camera2d,
+    customization: CustomizationOptions,
+    show_customizer: bool,
+    guy: Option<Guy>,
+    simulation_time: f32,
+    real_time: f32,
+}
+
+impl geng_tas::Tasable for Game {
+    type Saved = Saved;
 
     fn save(&self) -> Self::Saved {
-        self.my_guy.and_then(|id| self.guys.get(&id)).cloned()
+        Saved {
+            camera: self.camera.clone(),
+            customization: self.customization.clone(),
+            show_customizer: self.show_customizer,
+            guy: self.my_guy.and_then(|id| self.guys.get(&id)).cloned(),
+            simulation_time: self.simulation_time,
+            real_time: self.real_time,
+        }
     }
 
     fn load(&mut self, state: Self::Saved) {
-        match state {
+        self.camera = state.camera;
+        self.customization = state.customization;
+        self.show_customizer = state.show_customizer;
+        self.simulation_time = state.simulation_time;
+        self.real_time = state.real_time;
+        match state.guy {
             Some(mut guy) => {
                 if let Some(id) = self.my_guy {
                     guy.id = id;

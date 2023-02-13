@@ -16,7 +16,6 @@ mod level;
 mod logic;
 mod net;
 mod remote;
-mod tas;
 mod util;
 
 pub use assets::*;
@@ -121,7 +120,7 @@ fn main() {
                     assets.process();
                     let assets = Rc::new(assets);
                     let game = Game::new(&geng, &assets, level, opt, connection_info);
-                    tas::Tas::new(game, &geng)
+                    geng_tas::Tas::new(game, &geng)
                 }
             },
         );
