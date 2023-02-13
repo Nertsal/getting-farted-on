@@ -6,9 +6,8 @@ pub const CONTROLS_FORCE_FART: [geng::Key; 3] = [geng::Key::W, geng::Key::Up, ge
 
 pub struct LongFartSfx {
     pub finish_time: Option<f32>,
+    pub type_name: String,
     pub sfx: geng::SoundEffect,
-    pub bubble_sfx: geng::SoundEffect,
-    pub rainbow_sfx: geng::SoundEffect,
 }
 
 pub struct Game {
@@ -31,7 +30,7 @@ pub struct Game {
     pub real_time: f32,
     pub noise: noise::OpenSimplex,
     pub opt: Opt,
-    pub farticles: Vec<Farticle>,
+    pub farticles: HashMap<String, Vec<Farticle>>,
     pub volume: f32,
     pub client_id: Id,
     pub connection: Option<Connection>,
@@ -51,7 +50,7 @@ pub struct Game {
 impl Drop for Game {
     fn drop(&mut self) {
         if let Some(editor) = &mut self.editor {
-            editor.save_level(&self.level);
+            editor.save_level(&mut self.level);
         }
     }
 }
@@ -278,33 +277,33 @@ impl Game {
 
 impl geng::State for Game {
     fn draw(&mut self, framebuffer: &mut ugli::Framebuffer) {
-        let mut test = String::new();
-        let timer1 = Timer::new();
-        let mut timer = Timer::new();
         self.framebuffer_size = framebuffer.size().map(|x| x as f32);
         ugli::clear(framebuffer, Some(self.config.background_color), None, None);
 
-        self.draw_level_back(&self.level, framebuffer);
-        // TODO: geng impl Display for time::Duration
-        test += &format!("lvl back {}\n", timer.tick().as_secs_f64());
-        self.draw_guys(framebuffer);
-        test += &format!("guys {}\n", timer.tick().as_secs_f64());
-        self.draw_level_front(&self.level, framebuffer);
-        test += &format!("lvl front {}\n", timer.tick().as_secs_f64());
-        self.draw_farticles(framebuffer);
-        test += &format!("farticles {}\n", timer.tick().as_secs_f64());
-        self.draw_level_editor(framebuffer);
-        test += &format!("editor {}\n", timer.tick().as_secs_f64());
-        self.draw_customizer(framebuffer);
-        test += &format!("customizer {}\n", timer.tick().as_secs_f64());
-        self.draw_leaderboard(framebuffer);
-        test += &format!("lb {}\n", timer.tick().as_secs_f64());
-        self.draw_progress(framebuffer);
-        test += &format!("progress {}\n", timer.tick().as_secs_f64());
-
-        if timer1.elapsed().as_secs_f64() > 0.100 {
-            println!("{}", test);
+        for (index, layer) in self.level.layers.iter().enumerate() {
+            self.draw_layer_back(&self.level, index, framebuffer);
+            if layer.name == "main" {
+                self.geng.draw_2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw_2d::TexturedQuad::unit(&self.assets.closed_outhouse)
+                        .translate(self.level.spawn_point),
+                );
+                self.geng.draw_2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw_2d::TexturedQuad::unit(&self.assets.golden_toilet)
+                        .translate(self.level.finish_point),
+                );
+                self.draw_guys(framebuffer);
+                self.draw_farticles(framebuffer);
+            }
+            self.draw_layer_front(&self.level, index, framebuffer);
         }
+        self.draw_level_editor(framebuffer);
+        self.draw_customizer(framebuffer);
+        self.draw_leaderboard(framebuffer);
+        self.draw_progress(framebuffer);
     }
 
     fn fixed_update(&mut self, delta_time: f64) {

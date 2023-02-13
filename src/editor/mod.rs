@@ -16,6 +16,7 @@ pub struct EditorState {
     next_autosave: f32,
     available_tools: Vec<Box<dyn ToolConstructor>>,
     selected_tool_index: usize,
+    selected_layer: usize,
     tool: Box<dyn DynEditorTool>,
 }
 
@@ -41,6 +42,7 @@ impl EditorState {
             },
             next_autosave: 0.0,
             selected_tool_index,
+            selected_layer: 0,
             tool: available_tools[selected_tool_index].create(),
             available_tools,
         }
@@ -53,22 +55,31 @@ impl EditorState {
         }
     }
 
-    pub fn save_level(&self, level: &Level) {
-        #[cfg(not(target_arch = "wasm32"))]
-        serde_json::to_writer_pretty(
-            std::fs::File::create(run_dir().join("assets").join("level.json")).unwrap(),
-            level.info(),
-        )
-        .unwrap();
-        info!("LVL SAVED");
+    pub fn save_level(&self, level: &mut Level) {
+        if level.save() {
+            #[cfg(not(target_arch = "wasm32"))]
+            serde_json::to_writer_pretty(
+                std::io::BufWriter::new(
+                    std::fs::File::create(run_dir().join("assets").join("level.json")).unwrap(),
+                ),
+                level.info(),
+            )
+            .unwrap();
+            info!("LVL SAVED");
+        }
     }
 }
 
 impl Game {
     pub fn snapped_cursor_position(&self, level: &Level) -> vec2<f32> {
+        let Some(editor) = &self.editor else { return vec2::ZERO; };
+        let camera = geng::Camera2d {
+            center: self.camera.center * level.layers[editor.selected_layer].parallax,
+            ..self.camera
+        };
         self.snap_position(
             level,
-            self.camera.screen_to_world(
+            camera.screen_to_world(
                 self.framebuffer_size,
                 self.geng.window().mouse_pos().map(|x| x as f32),
             ),
@@ -78,10 +89,9 @@ impl Game {
     pub fn snap_position(&self, level: &Level, pos: vec2<f32>) -> vec2<f32> {
         let closest_point = itertools::chain![
             level
-                .surfaces
-                .iter()
+                .all_surfaces()
                 .flat_map(|surface| [surface.p1, surface.p2]),
-            level.tiles.iter().flat_map(|tile| tile.vertices)
+            level.all_tiles().flat_map(|tile| tile.vertices)
         ]
         .filter(|&p| (pos - p).len() < self.config.snap_distance)
         .min_by_key(|&p| r32((pos - p).len()));
@@ -90,12 +100,20 @@ impl Game {
 
     pub fn draw_level_editor(&self, framebuffer: &mut ugli::Framebuffer) {
         if let Some(editor) = &self.editor {
-            editor
-                .tool
-                .draw(&editor.cursor, &self.level, &self.camera, framebuffer);
+            let camera = geng::Camera2d {
+                center: self.camera.center * self.level.layers[editor.selected_layer].parallax,
+                ..self.camera
+            };
+            editor.tool.draw(
+                &editor.cursor,
+                &self.level,
+                editor.selected_layer,
+                &camera,
+                framebuffer,
+            );
             self.geng.draw_2d(
                 framebuffer,
-                &self.camera,
+                &camera,
                 &draw_2d::Quad::new(
                     Aabb2::point(self.snapped_cursor_position(&self.level)).extend_uniform(0.1),
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
@@ -119,9 +137,12 @@ impl Game {
             snapped_world_pos: cursor_pos,
         };
 
-        editor
-            .tool
-            .handle_event(&editor.cursor, event, &mut self.level);
+        editor.tool.handle_event(
+            &editor.cursor,
+            event,
+            &mut self.level,
+            editor.selected_layer,
+        );
 
         match event {
             geng::Event::KeyDown { key } => match key {
@@ -141,7 +162,7 @@ impl Game {
                             self.my_guy = Some(self.client_id);
                             self.guys.insert(Guy::new(
                                 self.client_id,
-                                cursor_pos,
+                                editor.cursor.world_pos,
                                 false,
                                 &self.config,
                             ));
@@ -149,7 +170,7 @@ impl Game {
                     }
                 }
                 geng::Key::S if self.geng.window().is_key_pressed(geng::Key::LCtrl) => {
-                    editor.save_level(&self.level);
+                    editor.save_level(&mut self.level);
                 }
                 _ => {}
             },
@@ -179,7 +200,30 @@ impl Game {
             column(tools)
         };
         let tool_config = editor.tool.ui(cx);
+        let layer_selection = {
+            column(
+                self.level
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .map(|(index, layer)| {
+                        let button = Button::new(cx, &layer.name);
+                        if button.was_clicked() {
+                            editor.selected_layer = index;
+                        }
+                        let mut widget: Box<dyn Widget> =
+                            Box::new(button.uniform_padding(8.0).center());
+                        if index == editor.selected_layer {
+                            widget =
+                                Box::new(widget.background_color(Rgba::new(0.5, 0.5, 1.0, 0.5)));
+                        }
+                        widget
+                    })
+                    .collect(),
+            )
+        };
         (
+            layer_selection.align(vec2(0.0, 1.0)),
             tool_selection.align(vec2(0.0, 1.0)),
             tool_config.align(vec2(0.0, 1.0)),
         )

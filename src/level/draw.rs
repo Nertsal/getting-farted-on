@@ -14,65 +14,87 @@ struct SurfaceVertex {
     a_flow: f32,
 }
 
+pub struct LayerMesh {
+    tiles: HashMap<String, ugli::VertexBuffer<TileVertex>>,
+    surfaces: HashMap<String, ugli::VertexBuffer<SurfaceVertex>>,
+}
+
 pub struct LevelMesh {
-    tiles: ugli::VertexBuffer<TileVertex>,
-    surfaces: ugli::VertexBuffer<SurfaceVertex>,
+    layers: Vec<LayerMesh>,
 }
 
 impl LevelMesh {
     pub fn new(geng: &Geng, level: &Level) -> Self {
         Self {
-            tiles: ugli::VertexBuffer::new_static(
-                geng.ugli(),
-                level
-                    .tiles
-                    .iter()
-                    .flat_map(|tile| {
-                        tile.vertices.into_iter().map(|v| TileVertex {
-                            a_pos: v,
-                            a_flow: tile.flow,
-                        })
-                    })
-                    .collect(),
-            ),
-            surfaces: ugli::VertexBuffer::new_static(
-                geng.ugli(),
-                level
-                    .surfaces
-                    .iter()
-                    .flat_map(|surface| {
-                        let normal = (surface.p2 - surface.p1).normalize().rotate_90();
-                        let len = (surface.p2 - surface.p1).len();
-                        let vs = [
-                            SurfaceVertex {
-                                a_pos: surface.p1,
-                                a_normal: normal,
-                                a_flow: surface.flow,
-                                a_vt: vec2(0.0, 0.0),
-                            },
-                            SurfaceVertex {
-                                a_pos: surface.p2,
-                                a_normal: normal,
-                                a_flow: surface.flow,
-                                a_vt: vec2(len, 0.0),
-                            },
-                            SurfaceVertex {
-                                a_pos: surface.p2,
-                                a_normal: normal,
-                                a_flow: surface.flow,
-                                a_vt: vec2(len, 1.0),
-                            },
-                            SurfaceVertex {
-                                a_pos: surface.p1,
-                                a_normal: normal,
-                                a_flow: surface.flow,
-                                a_vt: vec2(0.0, 1.0),
-                            },
-                        ];
-                        [vs[0], vs[1], vs[2], vs[0], vs[2], vs[3]]
-                    })
-                    .collect(),
-            ),
+            layers: level
+                .layers
+                .iter()
+                .map(|layer| LayerMesh {
+                    tiles: {
+                        let mut vertex_data: HashMap<String, Vec<TileVertex>> = HashMap::new();
+                        for tile in &layer.tiles {
+                            vertex_data
+                                .entry(tile.type_name.clone())
+                                .or_default()
+                                .extend(tile.vertices.into_iter().map(|v| TileVertex {
+                                    a_pos: v,
+                                    a_flow: tile.flow,
+                                }));
+                        }
+                        vertex_data
+                            .into_iter()
+                            .map(|(type_name, data)| {
+                                (type_name, ugli::VertexBuffer::new_static(geng.ugli(), data))
+                            })
+                            .collect()
+                    },
+                    surfaces: {
+                        let mut vertex_data: HashMap<String, Vec<SurfaceVertex>> = HashMap::new();
+                        for surface in &layer.surfaces {
+                            vertex_data
+                                .entry(surface.type_name.clone())
+                                .or_default()
+                                .extend({
+                                    let normal = (surface.p2 - surface.p1).normalize().rotate_90();
+                                    let len = (surface.p2 - surface.p1).len();
+                                    let vs = [
+                                        SurfaceVertex {
+                                            a_pos: surface.p1,
+                                            a_normal: normal,
+                                            a_flow: surface.flow,
+                                            a_vt: vec2(0.0, 0.0),
+                                        },
+                                        SurfaceVertex {
+                                            a_pos: surface.p2,
+                                            a_normal: normal,
+                                            a_flow: surface.flow,
+                                            a_vt: vec2(len, 0.0),
+                                        },
+                                        SurfaceVertex {
+                                            a_pos: surface.p2,
+                                            a_normal: normal,
+                                            a_flow: surface.flow,
+                                            a_vt: vec2(len, 1.0),
+                                        },
+                                        SurfaceVertex {
+                                            a_pos: surface.p1,
+                                            a_normal: normal,
+                                            a_flow: surface.flow,
+                                            a_vt: vec2(0.0, 1.0),
+                                        },
+                                    ];
+                                    [vs[0], vs[1], vs[2], vs[0], vs[2], vs[3]]
+                                });
+                        }
+                        vertex_data
+                            .into_iter()
+                            .map(|(type_name, data)| {
+                                (type_name, ugli::VertexBuffer::new_static(geng.ugli(), data))
+                            })
+                            .collect()
+                    },
+                })
+                .collect(),
         }
     }
 }
@@ -92,14 +114,20 @@ impl Game {
     fn draw_surfaces(
         &self,
         level: &Level,
+        layer_index: usize,
         framebuffer: &mut ugli::Framebuffer,
         texture: impl Fn(&SurfaceAssets) -> Option<&Texture>,
         texture_shift: f32,
         texture_move_direction: f32,
     ) {
+        let camera = geng::Camera2d {
+            center: self.camera.center * level.layers[layer_index].parallax,
+            ..self.camera
+        };
         let mesh = self.get_mesh(level);
-        for (index, surface) in level.surfaces.iter().enumerate() {
-            let assets = &self.assets.surfaces[&surface.type_name];
+
+        for (type_name, data) in &mesh.layers[layer_index].surfaces {
+            let assets = &self.assets.surfaces[type_name];
             let texture = match texture(assets) {
                 Some(texture) => texture,
                 None => continue,
@@ -110,7 +138,7 @@ impl Game {
                 framebuffer,
                 &self.assets.shaders.surface,
                 ugli::DrawMode::Triangles,
-                mesh.surfaces.slice(index * 6..index * 6 + 6),
+                data,
                 (
                     ugli::uniforms! {
                         u_texture: &**texture,
@@ -120,7 +148,7 @@ impl Game {
                         u_flex_amplitude: assets.params.flex_amplitude,
                         u_texture_shift: texture_shift,
                     },
-                    geng::camera2d_uniforms(&self.camera, self.framebuffer_size),
+                    geng::camera2d_uniforms(&camera, self.framebuffer_size),
                 ),
                 ugli::DrawParameters {
                     blend_mode: Some(ugli::BlendMode::straight_alpha()),
@@ -130,10 +158,21 @@ impl Game {
         }
     }
 
-    fn draw_tiles(&self, framebuffer: &mut ugli::Framebuffer, level: &Level, background: bool) {
+    fn draw_tiles(
+        &self,
+        framebuffer: &mut ugli::Framebuffer,
+        level: &Level,
+        layer_index: usize,
+        background: bool,
+    ) {
+        let camera = geng::Camera2d {
+            center: self.camera.center * level.layers[layer_index].parallax,
+            ..self.camera
+        };
         let mesh = self.get_mesh(level);
-        for (index, tile) in level.tiles.iter().enumerate() {
-            let assets = &self.assets.tiles[&tile.type_name];
+
+        for (type_name, data) in &mesh.layers[layer_index].tiles {
+            let assets = &self.assets.tiles[type_name];
             if assets.params.background != background {
                 continue;
             }
@@ -141,7 +180,7 @@ impl Game {
                 framebuffer,
                 &self.assets.shaders.tile,
                 ugli::DrawMode::Triangles,
-                mesh.tiles.slice(index * 3..index * 3 + 3),
+                data,
                 (
                     ugli::uniforms! {
                         u_texture: &*assets.texture,
@@ -150,8 +189,9 @@ impl Game {
                             self.noise(assets.params.texture_movement_frequency),
                             self.noise(assets.params.texture_movement_frequency),
                         ) * assets.params.texture_movement_amplitude,
+                        u_reveal_radius: level.layers[layer_index].reveal_radius,
                     },
-                    geng::camera2d_uniforms(&self.camera, self.framebuffer_size),
+                    geng::camera2d_uniforms(&camera, self.framebuffer_size),
                 ),
                 ugli::DrawParameters {
                     blend_mode: Some(ugli::BlendMode::straight_alpha()),
@@ -163,6 +203,10 @@ impl Game {
 
     pub fn draw_cannons(&self, level: &Level, framebuffer: &mut ugli::Framebuffer) {
         for cannon in &level.cannons {
+            let mut scale = vec2(1.0, 1.0);
+            if cannon.rot > f32::PI / 2.0 || cannon.rot < -f32::PI / 2.0 {
+                scale.x = -scale.x;
+            }
             self.geng.draw_2d(
                 framebuffer,
                 &self.camera,
@@ -173,7 +217,9 @@ impl Game {
             self.geng.draw_2d(
                 framebuffer,
                 &self.camera,
-                &draw_2d::TexturedQuad::unit(&self.assets.cannon.base).translate(cannon.pos),
+                &draw_2d::TexturedQuad::unit(&self.assets.cannon.base)
+                    .scale(scale)
+                    .translate(cannon.pos),
             );
         }
     }
@@ -191,25 +237,20 @@ impl Game {
         }
     }
 
-    pub fn draw_level_back(&self, level: &Level, framebuffer: &mut ugli::Framebuffer) {
-        self.draw_tiles(framebuffer, level, true);
-        self.geng.draw_2d(
-            framebuffer,
-            &self.camera,
-            &draw_2d::TexturedQuad::unit(&self.assets.closed_outhouse).translate(level.spawn_point),
-        );
-        self.geng.draw_2d(
-            framebuffer,
-            &self.camera,
-            &draw_2d::TexturedQuad::unit(&self.assets.golden_toilet).translate(level.finish_point),
-        );
+    pub fn draw_layer_back(
+        &self,
+        level: &Level,
+        layer_index: usize,
+        framebuffer: &mut ugli::Framebuffer,
+    ) {
+        self.draw_tiles(framebuffer, level, layer_index, true);
         {
-            for obj in &level.objects {
+            for obj in &level.layers[layer_index].objects {
                 self.geng.draw_2d(
                     framebuffer,
                     &self.camera,
                     &draw_2d::TexturedQuad::unit(&self.assets.objects[&obj.type_name])
-                        .transform(mat3::rotate(if obj.type_name == "unicorn" {
+                        .transform(mat3::rotate(if obj.fart_type().is_some() {
                             self.real_time
                         } else {
                             0.0
@@ -221,6 +262,7 @@ impl Game {
         }
         self.draw_surfaces(
             level,
+            layer_index,
             framebuffer,
             |assets| assets.back_texture.as_ref(),
             43756.0,
@@ -229,10 +271,16 @@ impl Game {
         self.draw_portals(level, framebuffer);
     }
 
-    pub fn draw_level_front(&self, level: &Level, framebuffer: &mut ugli::Framebuffer) {
-        self.draw_tiles(framebuffer, level, false);
+    pub fn draw_layer_front(
+        &self,
+        level: &Level,
+        layer_index: usize,
+        framebuffer: &mut ugli::Framebuffer,
+    ) {
+        self.draw_tiles(framebuffer, level, layer_index, false);
         self.draw_surfaces(
             level,
+            layer_index,
             framebuffer,
             |assets| assets.front_texture.as_ref(),
             -123.0,
