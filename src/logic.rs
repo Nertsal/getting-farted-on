@@ -1,5 +1,3 @@
-use std::f32::consts::FRAC_1_SQRT_2;
-
 use super::*;
 
 impl Game {
@@ -52,23 +50,30 @@ impl Game {
             false
         };
         for guy in &mut self.guys {
-            let delta_time = {
-                let mut delta_time = delta_time;
-                'tile_loop: for tile in self.level.gameplay_tiles() {
-                    for i in 0..3 {
-                        let p1 = tile.vertices[i];
-                        let p2 = tile.vertices[(i + 1) % 3];
-                        if vec2::skew(p2 - p1, guy.ball.pos - p1) < 0.0 {
-                            continue 'tile_loop;
-                        }
-                    }
-                    let params = &self.assets.tiles[&tile.type_name].params;
-                    if let Some(time_scale) = params.time_scale {
-                        delta_time *= time_scale;
-                    }
+            let mut time_scale = 1.0;
+            for tile in self.level.gameplay_tiles() {
+                if !Aabb2::points_bounding_box(tile.vertices)
+                    .extend_uniform(self.config.guy_radius)
+                    .contains(guy.ball.pos)
+                {
+                    continue;
                 }
-                delta_time
-            };
+                let params = &self.assets.tiles[&tile.type_name].params;
+                if let Some(this_time_scale) = params.time_scale {
+                    let percentage = circle_triangle_intersect_percentage(
+                        guy.ball.pos,
+                        self.config.guy_radius,
+                        tile.vertices,
+                    );
+                    time_scale *= this_time_scale.powf(percentage);
+                }
+            }
+            let delta_time = delta_time * time_scale;
+
+            let sfx_speed = (time_scale as f64).powf(self.config.sfx_time_scale_power);
+            if self.my_guy == Some(guy.id) {
+                self.music.set_speed(sfx_speed);
+            }
 
             let prev_state = guy.ball.clone();
             let was_colliding_water = is_colliding(guy, "water");
@@ -140,6 +145,7 @@ impl Game {
                             * (1.0 - (guy.ball.pos - self.camera.center).len() / self.camera.fov))
                             .clamp(0.0, 1.0) as f64,
                     );
+                    effect.set_speed(sfx_speed);
                     effect.play();
 
                     let fart_type = "normal"; // TODO: not normal LUL
@@ -195,14 +201,18 @@ impl Game {
 
             let mut in_water = false;
             let butt = guy.ball.pos + vec2(0.0, -guy.ball.radius * 0.9).rotate(guy.ball.rot);
-            'tile_loop: for tile in self.level.gameplay_tiles() {
-                for i in 0..3 {
-                    let p1 = tile.vertices[i];
-                    let p2 = tile.vertices[(i + 1) % 3];
-                    if vec2::skew(p2 - p1, guy.ball.pos - p1) < 0.0 {
-                        continue 'tile_loop;
-                    }
+            for tile in self.level.gameplay_tiles() {
+                if !Aabb2::points_bounding_box(tile.vertices)
+                    .extend_uniform(self.config.guy_radius)
+                    .contains(guy.ball.pos)
+                {
+                    continue;
                 }
+                let percentage = circle_triangle_intersect_percentage(
+                    guy.ball.pos,
+                    self.config.guy_radius,
+                    tile.vertices,
+                );
                 let relative_vel = guy.ball.vel - tile.flow;
                 let flow_direction = tile.flow.normalize_or_zero();
                 let relative_vel_along_flow = vec2::dot(flow_direction, relative_vel);
@@ -212,8 +222,10 @@ impl Game {
                 let friction_force = -relative_vel * params.friction;
                 guy.ball.vel += (force_along_flow + params.additional_force + friction_force)
                     * delta_time
-                    / guy.mass(&self.config);
-                guy.ball.w -= guy.ball.w * params.friction * delta_time / guy.mass(&self.config);
+                    / guy.mass(&self.config)
+                    * percentage;
+                guy.ball.w -=
+                    guy.ball.w * params.friction * delta_time / guy.mass(&self.config) * percentage;
                 // TODO inertia?
             }
             'tile_loop: for tile in self.level.gameplay_tiles() {
@@ -284,6 +296,7 @@ impl Game {
                     // TODO: this is copypasta
                     let mut sfx = fart_assets.long_sfx.effect();
                     sfx.set_volume(volume);
+                    sfx.set_speed(sfx_speed);
                     sfx.play();
                     if let Some(mut sfx) = self.long_fart_sfx.insert(
                         guy.id,
@@ -297,6 +310,7 @@ impl Game {
                     }
                 } else {
                     sfx.sfx.set_volume(volume);
+                    sfx.sfx.set_speed(sfx_speed);
                 }
             } else {
                 warn!("No sfx for long fart?");
@@ -348,8 +362,8 @@ impl Game {
                 {
                     let mut sfx = fart_assets.long_sfx.effect();
                     sfx.set_volume(0.0);
+                    sfx.set_speed(sfx_speed);
                     sfx.play();
-                    info!("Started the long fart");
                     if let Some(mut sfx) = self.long_fart_sfx.insert(
                         guy.id,
                         LongFartSfx {
@@ -393,6 +407,7 @@ impl Game {
                         * (1.0 - (guy.ball.pos - self.camera.center).len() / self.camera.fov))
                         .clamp(0.0, 1.0) as f64,
                 );
+                effect.set_speed(sfx_speed);
                 effect.play();
             } else if !could_fart
                 && guy.fart_state.fart_pressure >= self.config.fart_pressure_released
@@ -431,14 +446,14 @@ impl Game {
             let mut collision_to_resolve = None;
             let mut was_colliding_water = was_colliding_water;
             for surface in self.level.gameplay_surfaces() {
-                let v = surface.vector_from(guy.ball.pos);
-                let penetration = guy.radius() - v.len();
-                if penetration > EPS {
+                let from_surface = -surface.vector_from(guy.ball.pos);
+                let penetration = guy.radius() - from_surface.len();
+                if penetration > 0.0 {
                     let assets = &self.assets.surfaces[&surface.type_name];
 
                     if surface.type_name == "water" && !was_colliding_water {
                         was_colliding_water = true;
-                        if vec2::dot(v, guy.ball.vel).abs() > 0.5 {
+                        if vec2::dot(from_surface, guy.ball.vel).abs() > 0.5 {
                             let mut effect = self.assets.sfx.water_splash.effect();
                             effect.set_volume(
                                 (self.volume
@@ -448,6 +463,7 @@ impl Game {
                                             / self.camera.fov))
                                     .clamp(0.0, 1.0) as f64,
                             );
+                            effect.set_speed(sfx_speed);
                             effect.play();
                             let fart_type = "bubble";
                             let fart_assets = &self.assets.farts[fart_type];
@@ -455,8 +471,7 @@ impl Game {
                             for _ in 0..30 {
                                 farticles.push(Farticle {
                                     size: 0.6,
-                                    pos: guy.ball.pos
-                                        + v
+                                    pos: guy.ball.pos - from_surface
                                         + vec2(
                                             thread_rng().gen_range(-guy.radius()..=guy.radius()),
                                             0.0,
@@ -485,7 +500,7 @@ impl Game {
                     if assets.params.non_collidable {
                         continue;
                     }
-                    let normal = -v.normalize_or_zero();
+                    let normal = from_surface.normalize_or_zero();
                     let normal_vel = vec2::dot(normal, guy.ball.vel);
                     if normal_vel < -EPS
                         && normal_vel > -assets.params.fallthrough_speed.unwrap_or(1e9)
@@ -501,11 +516,16 @@ impl Game {
                         collision_to_resolve = std::cmp::max_by_key(
                             collision_to_resolve,
                             Some(collision),
-                            |collision| {
-                                r32(match collision {
-                                    Some(collision) => collision.penetration,
-                                    None => -1.0,
-                                })
+                            |collision| match collision {
+                                Some(collision) => (
+                                    r32(collision.penetration),
+                                    r32(vec2::skew(
+                                        (collision.surface.p2 - collision.surface.p1)
+                                            .normalize_or_zero(),
+                                        collision.normal,
+                                    )),
+                                ),
+                                None => (r32(-1.0), r32(0.0)),
                             },
                         );
                     }
@@ -557,7 +577,8 @@ impl Game {
                         / (self.config.snow_falloff_impulse_max
                             - self.config.snow_falloff_impulse_min))
                         .clamp(0.0, 1.0)
-                        * self.config.max_snow_layer;
+                        * self.config.max_snow_layer
+                        * collision.assets.params.snow_falloff;
                     let snow_falloff = snow_falloff.min(guy.snow_layer);
                     guy.snow_layer -= snow_falloff;
                     let fart_type = "normal"; // TODO: not normal?
@@ -592,6 +613,7 @@ impl Game {
                                     - (guy.ball.pos - self.camera.center).len() / self.camera.fov))
                                 .clamp(0.0, 1.0) as f64,
                         );
+                        effect.set_speed(sfx_speed);
                         effect.play();
                     }
                 }
@@ -615,7 +637,7 @@ impl Game {
 
     pub fn handle_connection(&mut self) {
         let messages: Vec<ServerMessage> = match &mut self.connection {
-            Some(con) => con.new_messages().collect(),
+            Some(con) => con.new_messages().collect::<anyhow::Result<_>>().unwrap(),
             None => return,
         };
         for message in messages {

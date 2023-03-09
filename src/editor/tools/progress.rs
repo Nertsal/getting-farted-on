@@ -19,11 +19,12 @@ pub struct ProgressTool {
 }
 
 impl ProgressTool {
-    fn find_hovered_point(&self, cursor: &Cursor, level: &Level) -> Option<usize> {
+    fn find_hovered_point(&self, cursor: &Cursor, level: &Level) -> Option<(usize, usize)> {
         level
             .expected_path
             .iter()
             .enumerate()
+            .flat_map(|(i, path)| path.iter().enumerate().map(move |(j, p)| ((i, j), p)))
             .filter(|(_index, &pos)| (pos - cursor.world_pos).len() < self.config.snap_distance)
             .min_by_key(|(_index, &pos)| r32((pos - cursor.world_pos).len()))
             .map(|(index, _pos)| index)
@@ -47,7 +48,7 @@ impl EditorTool for ProgressTool {
         camera: &geng::Camera2d,
         framebuffer: &mut ugli::Framebuffer,
     ) {
-        for (i, &p) in level.expected_path.iter().enumerate() {
+        for (i, &p) in level.expected_path.iter().flatten().enumerate() {
             self.assets.font.draw(
                 framebuffer,
                 camera,
@@ -58,19 +59,20 @@ impl EditorTool for ProgressTool {
                 Rgba::new(0.0, 0.0, 0.0, 0.5),
             );
         }
-        for seg in level.expected_path.windows(2) {
+        for path in &level.expected_path {
             self.geng.draw_2d(
                 framebuffer,
                 camera,
-                &draw_2d::Segment::new(
-                    Segment(seg[0], seg[1]),
-                    0.1,
+                &draw_2d::Chain::new(
+                    CardinalSpline::new(path.clone(), 0.5).chain(5),
+                    level.max_progress_distance * 2.0,
                     Rgba::new(0.0, 0.0, 0.0, 0.25),
+                    5,
                 ),
             );
         }
-        if let Some(index) = self.find_hovered_point(cursor, level) {
-            let point = level.expected_path[index];
+        if let Some((i, j)) = self.find_hovered_point(cursor, level) {
+            let point = level.expected_path[i][j];
             self.geng.draw_2d(
                 framebuffer,
                 camera,
@@ -80,21 +82,23 @@ impl EditorTool for ProgressTool {
                 ),
             );
         }
-        self.geng.draw_2d(
-            framebuffer,
-            &geng::Camera2d {
-                center: vec2::ZERO,
-                rotation: 0.0,
-                fov: 15.0,
-            },
-            &draw_2d::Text::unit(
-                &**self.geng.default_font(),
-                format!("{}%", (level.progress_at(cursor.world_pos) * 100.0) as i32),
-                Rgba::BLACK,
-            )
-            .scale_uniform(0.2)
-            .translate(vec2(0.0, -6.0)),
-        )
+        if let Some(progress) = level.progress_at(cursor.world_pos) {
+            self.geng.draw_2d(
+                framebuffer,
+                &geng::Camera2d {
+                    center: vec2::ZERO,
+                    rotation: 0.0,
+                    fov: 15.0,
+                },
+                &draw_2d::Text::unit(
+                    &**self.geng.default_font(),
+                    format!("{}%", (progress * 100.0) as i32),
+                    Rgba::BLACK,
+                )
+                .scale_uniform(0.2)
+                .translate(vec2(0.0, -6.0)),
+            );
+        }
     }
     fn handle_event(
         &mut self,
@@ -108,14 +112,28 @@ impl EditorTool for ProgressTool {
                 button: geng::MouseButton::Left,
                 ..
             } => {
-                level.modify().expected_path.push(cursor.world_pos);
+                let level = level.modify();
+                if level.expected_path.is_empty()
+                    || self.geng.window().is_key_pressed(geng::Key::LShift)
+                {
+                    level.expected_path.push(vec![]);
+                }
+                level
+                    .expected_path
+                    .last_mut()
+                    .unwrap()
+                    .push(cursor.world_pos);
             }
             geng::Event::MouseDown {
                 button: geng::MouseButton::Right,
                 ..
             } => {
-                if let Some(index) = self.find_hovered_point(cursor, level) {
-                    level.modify().expected_path.remove(index);
+                if let Some((i, j)) = self.find_hovered_point(cursor, level) {
+                    let level = level.modify();
+                    level.expected_path[i].remove(j);
+                    if level.expected_path[i].is_empty() {
+                        level.expected_path.remove(i);
+                    }
                 }
             }
             _ => {}
