@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-geng = { git = "https://github.com/kuviman/geng" }
+geng = { git = "https://github.com/nertsal/geng", branch = "tas" }
 geng_tas = { git = "https://github.com/nertsal/geng-tas" }
 serde = "1"
 noise = "0.8.2"
