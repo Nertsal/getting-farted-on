@@ -26,6 +26,8 @@
         ];
         libDeps = with pkgs; waylandDeps ++ xorgDeps ++ [
           alsa-lib
+          cmake
+          fontconfig
           udev
           libGL
           xorg.libxcb
@@ -60,6 +62,7 @@
           ];
           shellHook = ''
             export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${libPath}"
+            export WINIT_UNIX_BACKEND=x11
           '';
         };
 
