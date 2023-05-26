@@ -8,10 +8,13 @@ pub struct Tile {
     pub type_name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(geng::asset::Load, Deserialize)]
+#[load(json)]
 pub struct TileParams {
     #[serde(default)]
-    pub background: bool,
+    pub svg: bool,
+    #[serde(default = "one")]
+    pub texture_scale: f32,
     #[serde(default)]
     pub friction_along_flow: f32,
     #[serde(default)]
@@ -23,45 +26,47 @@ pub struct TileParams {
     #[serde(default = "zero_vec")]
     pub additional_force: vec2<f32>,
     pub time_scale: Option<f32>,
+    #[serde(default = "default_draw_times")]
+    pub draw_times: usize,
+    #[serde(default)]
+    pub fadeout_distance: f32,
+    #[serde(default)]
+    pub texture_rotation: f32,
 }
 
+fn default_draw_times() -> usize {
+    1
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+#[derive(geng::asset::Load)]
+#[load(sequential)]
 pub struct TileAssets {
-    pub name: String,
     pub params: TileParams,
+    #[load(load_with = "load_tile_texture(&manager, &base_path, &params)")]
     pub texture: Texture,
 }
 
-pub fn load_tile_assets(
-    geng: &Geng,
-    path: &std::path::Path,
-) -> geng::AssetFuture<HashMap<String, TileAssets>> {
-    let geng = geng.clone();
-    let path = path.to_owned();
-    async move {
-        let json = <String as geng::LoadAsset>::load(&geng, &path.join("config.json")).await?;
-        let config: std::collections::BTreeMap<String, TileParams> =
-            serde_json::from_str(&json).unwrap();
-        future::join_all(config.into_iter().map(|(name, params)| {
-            let geng = geng.clone();
-            let path = path.clone();
-            async move {
-                let mut texture =
-                    <Texture as geng::LoadAsset>::load(&geng, &path.join(format!("{}.png", name)))
-                        .await?;
-                texture.0.set_wrap_mode(ugli::WrapMode::Repeat);
-                Ok((
-                    name.clone(),
-                    TileAssets {
-                        name,
-                        params,
-                        texture,
-                    },
-                ))
-            }
-        }))
-        .await
-        .into_iter()
-        .collect::<Result<_, anyhow::Error>>()
-    }
-    .boxed_local()
+async fn load_tile_texture(
+    manager: &geng::asset::Manager,
+    base_path: &std::path::Path,
+    params: &TileParams,
+) -> anyhow::Result<Texture> {
+    let mut texture: Texture = manager
+        .load(
+            base_path
+                .join("texture")
+                .with_extension(if params.svg { "svg" } else { "png" }),
+        )
+        .await?;
+    texture.set_filter(ugli::Filter::Nearest); // TODO premultiplied alpha instead
+    make_repeated(&mut texture);
+    Ok(texture)
+}
+
+fn make_repeated(texture: &mut Texture) {
+    texture.set_wrap_mode(ugli::WrapMode::Repeat);
 }

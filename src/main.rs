@@ -1,3 +1,6 @@
+#[cfg(feature = "dynamic-linking")]
+use dynamic_linking;
+
 // TODO: custom fart texture/color/sound
 
 // TODO: write the rest of this comment
@@ -11,12 +14,16 @@ mod editor;
 mod farticle;
 mod game;
 mod guy;
+mod id;
 mod leaderboard;
 mod level;
 mod logic;
 mod net;
 mod remote;
+mod replay;
+mod svg;
 mod util;
+mod video_editor;
 
 pub use assets::*;
 pub use customizer::*;
@@ -24,11 +31,13 @@ pub use editor::*;
 pub use farticle::*;
 pub use game::*;
 pub use guy::*;
+pub use id::*;
 pub use leaderboard::*;
 pub use level::*;
 pub use logic::*;
 pub use net::*;
 pub use remote::*;
+pub use replay::*;
 pub use util::*;
 
 #[derive(clap::Parser, Clone)]
@@ -39,15 +48,23 @@ pub struct Opt {
     pub server: Option<String>,
     #[clap(long)]
     pub connect: Option<String>,
-    #[clap(long, default_value = "level.json")]
-    pub level: std::path::PathBuf,
+    #[clap(long)]
+    pub level: Option<std::path::PathBuf>,
+    #[clap(long)]
+    pub assets: Option<std::path::PathBuf>,
+    #[clap(long)]
+    pub video: Option<std::path::PathBuf>,
+    #[clap(long)]
+    pub accessibility: Option<f32>,
     #[clap(flatten)]
     pub geng: geng::CliArgs,
 }
 
 fn main() {
     geng::setup_panic_handler();
-    let mut opt: Opt = program_args::parse();
+    let mut opt: Opt = cli::parse();
+
+    let assets_dir = opt.assets.clone().unwrap_or(run_dir().join("assets"));
 
     if opt.connect.is_none() && opt.server.is_none() {
         if cfg!(target_arch = "wasm32") {
@@ -62,7 +79,7 @@ fn main() {
         }
     }
 
-    logger::init().unwrap();
+    logger::init();
 
     if opt.server.is_some() && opt.connect.is_none() {
         #[cfg(not(target_arch = "wasm32"))]
@@ -106,14 +123,16 @@ fn main() {
         geng.clone().run_loading(async move {
             let ((assets, level), connection_info) = future::join(
                 future::join(
-                    <Assets as geng::LoadAsset>::load(&geng, &run_dir().join("assets")),
-                    Level::load(run_dir().join("assets").join(&opt.level), opt.editor),
+                    <AssetsHandle as geng::asset::Load>::load(geng.asset_manager(), &assets_dir),
+                    Level::load(
+                        opt.level.clone().unwrap_or(assets_dir.join("level.json")),
+                        opt.editor,
+                    ),
                 ),
                 connection,
             )
             .await;
-            let mut assets = assets.expect("Failed to load assets");
-            assets.process();
+            let assets = assets.expect("Failed to load assets");
             let assets = Rc::new(assets);
             let game = Game::new(&geng, &assets, level, opt, connection_info);
             geng_tas::Tas::new(game, &geng)

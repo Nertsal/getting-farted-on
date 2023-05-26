@@ -1,13 +1,18 @@
 use super::*;
 
 pub use noise::NoiseFn;
+pub use std::collections::VecDeque;
 
 pub const EPS: f32 = 1e-9;
 
-pub type Id = i32;
+#[derive(Deref, DerefMut)]
+pub struct Texture(#[deref] ugli::Texture);
 
-#[derive(Deref)]
-pub struct Texture(#[deref] pub ugli::Texture);
+impl From<ugli::Texture> for Texture {
+    fn from(texture: ugli::Texture) -> Self {
+        Self(texture)
+    }
+}
 
 impl std::borrow::Borrow<ugli::Texture> for Texture {
     fn borrow(&self) -> &ugli::Texture {
@@ -20,15 +25,25 @@ impl std::borrow::Borrow<ugli::Texture> for &'_ Texture {
     }
 }
 
-impl geng::LoadAsset for Texture {
-    fn load(geng: &Geng, path: &std::path::Path) -> geng::AssetFuture<Self> {
-        let texture = <ugli::Texture as geng::LoadAsset>::load(geng, path);
-        async move {
-            let mut texture = texture.await?;
-            texture.set_filter(ugli::Filter::Nearest);
-            Ok(Texture(texture))
+impl geng::asset::Load for Texture {
+    fn load(manager: &geng::asset::Manager, path: &std::path::Path) -> geng::asset::Future<Self> {
+        if path.extension() == Some("svg".as_ref()) {
+            let manager = manager.clone();
+            let path = path.to_owned();
+            async move {
+                let svg = svg::load(path).await?;
+                Ok(Texture(svg::render(manager.ugli(), &svg.tree, None)))
+            }
+            .boxed_local()
+        } else {
+            let texture = <ugli::Texture as geng::asset::Load>::load(manager, path);
+            async move {
+                let mut texture = texture.await?;
+                texture.set_filter(ugli::Filter::Nearest);
+                Ok(Texture(texture))
+            }
+            .boxed_local()
         }
-        .boxed_local()
     }
 
     const DEFAULT_EXT: Option<&'static str> = Some("png");
@@ -40,9 +55,9 @@ pub fn zero_vec() -> vec2<f32> {
 
 impl Game {
     #[track_caller]
-    pub fn noise(&self, frequency: f32) -> f32 {
+    pub fn noise(&self, phase: f32, frequency: f32) -> f32 {
         let caller = std::panic::Location::caller();
-        let phase = caller.line() as f64 * 1000.0 + caller.column() as f64;
+        let phase = caller.line() as f64 * 1000.0 + caller.column() as f64 + phase as f64;
         self.noise.get([(self.real_time * frequency) as f64, phase]) as f32
     }
 }
@@ -104,4 +119,14 @@ pub fn circle_triangle_intersect_area(center: vec2<f32>, radius: f32, tri: [vec2
         sum += circle_segment_area(radius, [a, b]);
     }
     sum
+}
+
+pub fn ray_hit_time(
+    ray_start: vec2<f32>,
+    ray_vel: vec2<f32>,
+    line_p: vec2<f32>,
+    line_normal: vec2<f32>,
+) -> f32 {
+    // dot(ray_start + ray_vel * t - line_p, line_normal) = 0
+    vec2::dot(line_p - ray_start, line_normal) / vec2::dot(ray_vel, line_normal)
 }

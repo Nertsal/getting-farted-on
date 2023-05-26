@@ -3,7 +3,7 @@ use super::*;
 pub struct EditToolConfig {}
 
 impl EditorToolConfig for EditToolConfig {
-    fn default(assets: &Assets) -> Self {
+    fn default(assets: &AssetsHandle) -> Self {
         Self {}
     }
 }
@@ -19,7 +19,7 @@ enum State {
 
 pub struct EditTool {
     geng: Geng,
-    assets: Rc<Assets>,
+    assets: AssetsHandle,
     config: EditToolConfig,
     // selected_surfaces: HashSet<usize>,
     // selected_tiles: HashSet<usize>,
@@ -87,7 +87,7 @@ impl EditTool {
 
 impl EditorTool for EditTool {
     type Config = EditToolConfig;
-    fn new(geng: &Geng, assets: &Rc<Assets>, config: EditToolConfig) -> Self {
+    fn new(geng: &Geng, assets: &AssetsHandle, config: EditToolConfig) -> Self {
         Self {
             geng: geng.clone(),
             assets: assets.clone(),
@@ -119,10 +119,10 @@ impl EditorTool for EditTool {
                 .into_iter()
                 .any(|p| self.is_selected(p))
             {
-                self.geng.draw_2d(
+                self.geng.draw2d().draw2d(
                     framebuffer,
                     camera,
-                    &draw_2d::Segment::new(
+                    &draw2d::Segment::new(
                         Segment(transform(surface.p1), transform(surface.p2)),
                         0.2,
                         Rgba::new(1.0, 1.0, 1.0, 0.5),
@@ -132,10 +132,10 @@ impl EditorTool for EditTool {
         }
         for (index, tile) in level.layers[selected_layer].tiles.iter().enumerate() {
             if tile.vertices.into_iter().any(|p| self.is_selected(p)) {
-                self.geng.draw_2d(
+                self.geng.draw2d().draw2d(
                     framebuffer,
                     camera,
-                    &draw_2d::Polygon::new(
+                    &draw2d::Polygon::new(
                         tile.vertices.iter().copied().map(transform).collect(),
                         Rgba::new(1.0, 1.0, 1.0, 0.5),
                     ),
@@ -143,20 +143,20 @@ impl EditorTool for EditTool {
             }
         }
         for &p in &self.selected_vertices {
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 camera,
-                &draw_2d::Quad::new(
+                &draw2d::Quad::new(
                     Aabb2::point(transform(p)).extend_uniform(0.2),
                     Rgba::new(1.0, 1.0, 1.0, 0.5),
                 ),
             );
         }
         if let State::DragSelection { start } = self.state {
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 camera,
-                &draw_2d::Quad::new(
+                &draw2d::Quad::new(
                     Aabb2::from_corners(start, cursor.snapped_world_pos),
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
                 ),

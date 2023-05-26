@@ -18,15 +18,14 @@ pub struct Game {
     pub prev_mouse_pos: vec2<f64>,
     pub geng: Geng,
     pub config: Rc<Config>,
-    pub assets: Rc<Assets>,
+    pub assets: AssetsHandle,
     pub camera: geng::Camera2d,
     pub level: Level,
     pub editor: Option<EditorState>,
     pub guys: Collection<Guy>,
     pub my_guy: Option<Id>,
     pub simulation_time: f32,
-    pub remote_simulation_times: HashMap<Id, f32>,
-    pub remote_updates: HashMap<Id, std::collections::VecDeque<(f32, Guy)>>,
+    pub remote_updates: HashMap<Id, Replay>,
     pub real_time: f32,
     pub noise: noise::OpenSimplex,
     pub opt: Opt,
@@ -44,6 +43,14 @@ pub struct Game {
     pub show_leaderboard: bool,
     pub follow: Option<Id>,
     pub long_fart_sfx: HashMap<Id, LongFartSfx>,
+    pub next_golden_glint: f32,
+    pub time_scale: f32,
+    pub quicksave: Option<Guy>,
+    pub replays: Vec<Replay>,
+    pub recording: Option<Replay>,
+    pub video_editor: Option<video_editor::VideoEditor>,
+    pub active_gamepad: Option<gilrs::GamepadId>,
+    pub next_save: f32,
 }
 
 impl Drop for Game {
@@ -103,25 +110,25 @@ impl geng_tas::Tasable for Game {
 impl Game {
     pub fn new(
         geng: &Geng,
-        assets: &Rc<Assets>,
+        assets: &AssetsHandle,
         level: Level,
         opt: Opt,
         connection_info: Option<(Id, Connection)>,
     ) -> Self {
         let (client_id, connection) = match connection_info {
             Some((client_id, connection)) => (client_id, Some(connection)),
-            None => (-1, None),
+            None => (Id::LOCALHOST, None),
         };
         let mut result = Self {
             best_time: None,
             emotes: vec![],
             geng: geng.clone(),
-            config: assets.config.clone(),
+            config: assets.get().config.clone(),
             assets: assets.clone(),
             camera: geng::Camera2d {
                 center: level.spawn_point,
                 rotation: 0.0,
-                fov: assets.config.camera_fov,
+                fov: assets.get().config.camera_fov,
             },
             framebuffer_size: vec2(1.0, 1.0),
             editor: if opt.editor {
@@ -137,13 +144,13 @@ impl Game {
             prev_mouse_pos: vec2::ZERO,
             opt: opt.clone(),
             farticles: default(),
-            volume: assets.config.volume,
+            volume: assets.get().config.volume,
             client_id,
             connection,
-            simulation_time: 0.0,
-            remote_simulation_times: HashMap::new(),
+            simulation_time: preferences::load("simulation_time").unwrap_or(0.0),
             remote_updates: default(),
-            customization: CustomizationOptions::random(),
+            customization: preferences::load("customization")
+                .unwrap_or_else(CustomizationOptions::random),
             mute_music: false,
             best_progress: 0.0,
             ui_controller: ui::Controller::new(geng, assets),
@@ -159,7 +166,7 @@ impl Game {
             ],
             show_customizer: !opt.editor,
             music: {
-                let mut effect = assets.sfx.new_music.play();
+                let mut effect = assets.get().sfx.new_music.play();
                 effect.set_volume(0.0);
                 effect
             },
@@ -167,15 +174,38 @@ impl Game {
             show_leaderboard: true,
             follow: None,
             long_fart_sfx: HashMap::new(),
+            next_golden_glint: 0.0,
+            quicksave: None,
+            time_scale: 1.0,
+            replays: if cfg!(target_arch = "wasm32") {
+                vec![]
+            } else {
+                let path = run_dir().join("replays");
+                if path.exists() {
+                    futures::executor::block_on(replay::load_histories(path))
+                        .unwrap()
+                        .into_iter()
+                        .map(Replay::from_history)
+                        .collect()
+                } else {
+                    vec![]
+                }
+            },
+            recording: None,
+            video_editor: opt
+                .video
+                .as_ref()
+                .map(|path| video_editor::VideoEditor::new(geng, path)),
+            active_gamepad: None,
+            next_save: 0.0,
         };
         if !opt.editor {
             result.my_guy = Some(client_id);
-            result.guys.insert(Guy::new(
-                client_id,
-                result.level.spawn_point,
-                true,
-                &result.config,
-            ));
+            let mut me = Guy::new(client_id, result.level.spawn_point, true, &result.config);
+            if let Some(state) = preferences::load("save") {
+                me.state = state;
+            }
+            result.guys.insert(me);
         }
         result
     }
@@ -191,20 +221,24 @@ impl Game {
                 fov: 10.0,
             };
             let guy = self.guys.get_mut(&id).unwrap();
+            let text_color = if guy.progress.finished {
+                Rgba::WHITE
+            } else {
+                Rgba::BLACK
+            };
             if guy.progress.finished {
-                self.assets.font.draw(
+                self.assets.get().font.draw(
                     framebuffer,
                     &camera,
                     &"GG",
-                    vec2(0.0, 3.0),
-                    geng::TextAlign::CENTER,
-                    1.5,
-                    Rgba::BLACK,
+                    vec2::splat(geng::TextAlign::CENTER),
+                    mat3::translate(vec2(0.0, 3.0)) * mat3::scale_uniform(1.5),
+                    text_color,
                 );
             }
             let progress = self
                 .level
-                .progress_at(guy.ball.pos)
+                .progress_at(guy.state.pos)
                 .unwrap_or(guy.progress.current);
             guy.progress.current = progress;
             self.best_progress = self.best_progress.max(progress);
@@ -226,48 +260,63 @@ impl Game {
                 time_text += &format!("{} minutes ", minutes);
             }
             time_text += &format!("{} seconds", seconds);
-            self.assets.font.draw(
+            self.assets.get().font.draw(
                 framebuffer,
                 &camera,
                 &time_text,
-                vec2(0.0, -3.3),
-                geng::TextAlign::CENTER,
-                0.5,
-                Rgba::BLACK,
+                vec2::splat(geng::TextAlign::CENTER),
+                mat3::translate(vec2(0.0, -3.3)) * mat3::scale_uniform(0.5),
+                text_color,
             );
-            self.assets.font.draw(
-                framebuffer,
-                &camera,
-                &"progress",
-                vec2(0.0, -4.0),
-                geng::TextAlign::CENTER,
-                0.5,
-                Rgba::BLACK,
-            );
-            self.geng.draw_2d(
-                framebuffer,
-                &camera,
-                &draw_2d::Quad::new(
-                    Aabb2::point(vec2(0.0, -4.5)).extend_symmetric(vec2(3.0, 0.1)),
-                    Rgba::BLACK,
-                ),
-            );
-            self.geng.draw_2d(
-                framebuffer,
-                &camera,
-                &draw_2d::Quad::new(
-                    Aabb2::point(vec2(-3.0 + 6.0 * self.best_progress, -4.5)).extend_uniform(0.3),
-                    Rgba::new(0.0, 0.0, 0.0, 0.5),
-                ),
-            );
-            self.geng.draw_2d(
-                framebuffer,
-                &camera,
-                &draw_2d::Quad::new(
-                    Aabb2::point(vec2(-3.0 + 6.0 * progress, -4.5)).extend_uniform(0.3),
-                    Rgba::BLACK,
-                ),
-            );
+            if !guy.progress.finished {
+                self.assets.get().font.draw(
+                    framebuffer,
+                    &camera,
+                    &"progress",
+                    vec2::splat(geng::TextAlign::CENTER),
+                    mat3::translate(vec2(0.0, -4.0)) * mat3::scale_uniform(0.5),
+                    text_color,
+                );
+                self.geng.draw2d().draw2d(
+                    framebuffer,
+                    &camera,
+                    &draw2d::Quad::new(
+                        Aabb2::point(vec2(0.0, -4.5)).extend_symmetric(vec2(3.0, 0.1)),
+                        text_color,
+                    ),
+                );
+                self.geng.draw2d().draw2d(
+                    framebuffer,
+                    &camera,
+                    &draw2d::Quad::new(
+                        Aabb2::point(vec2(-3.0 + 6.0 * self.best_progress, -4.5))
+                            .extend_uniform(0.3),
+                        Rgba::new(0.0, 0.0, 0.0, 0.5),
+                    ),
+                );
+                self.geng.draw2d().draw2d(
+                    framebuffer,
+                    &camera,
+                    &draw2d::Quad::new(
+                        Aabb2::point(vec2(-3.0 + 6.0 * progress, -4.5)).extend_uniform(0.3),
+                        text_color,
+                    ),
+                );
+            }
+        }
+    }
+    fn save_replays(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            replay::save(
+                run_dir().join("replays"),
+                &self
+                    .replays
+                    .iter()
+                    .map(|replay| &replay.history)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
         }
     }
 }
@@ -275,61 +324,117 @@ impl Game {
 impl geng::State for Game {
     fn draw(&mut self, framebuffer: &mut ugli::Framebuffer) {
         self.framebuffer_size = framebuffer.size().map(|x| x as f32);
-        ugli::clear(framebuffer, Some(self.config.background_color), None, None);
+        let finished = self
+            .my_guy
+            .and_then(|id| self.guys.get(&id))
+            .map(|guy| guy.progress.finished)
+            .unwrap_or(false);
+        ugli::clear(
+            framebuffer,
+            Some(if finished {
+                Rgba::BLACK
+            } else {
+                self.config.background_color
+            }),
+            None,
+            None,
+        );
 
         for (index, layer) in self.level.layers.iter().enumerate() {
-            self.draw_layer_back(&self.level, index, framebuffer);
+            if !finished {
+                self.draw_layer_back(&self.level, index, framebuffer);
+            }
             if layer.name == "main" {
-                self.geng.draw_2d(
+                self.geng.draw2d().draw2d(
                     framebuffer,
                     &self.camera,
-                    &draw_2d::TexturedQuad::unit(&self.assets.closed_outhouse)
+                    &draw2d::TexturedQuad::unit(&self.assets.get().closed_outhouse)
                         .translate(self.level.spawn_point),
                 );
-                self.geng.draw_2d(
+                self.geng.draw2d().draw2d(
                     framebuffer,
                     &self.camera,
-                    &draw_2d::TexturedQuad::unit(&self.assets.golden_toilet)
+                    &draw2d::TexturedQuad::unit(&self.assets.get().golden_toilet)
                         .translate(self.level.finish_point),
                 );
                 self.draw_guys(framebuffer);
                 self.draw_farticles(framebuffer);
             }
-            self.draw_layer_front(&self.level, index, framebuffer);
+            if !finished {
+                self.draw_layer_front(&self.level, index, framebuffer);
+            }
         }
         self.draw_level_editor(framebuffer);
         self.draw_customizer(framebuffer);
         self.draw_leaderboard(framebuffer);
         self.draw_progress(framebuffer);
+
+        if self.recording.is_some() {
+            self.geng.default_font().draw(
+                framebuffer,
+                &geng::PixelPerfectCamera,
+                "RECORDING",
+                vec2::splat(geng::TextAlign::LEFT),
+                mat3::scale_uniform(64.0),
+                Rgba::RED,
+            );
+        }
+
+        if let Some(radius) = self.opt.accessibility {
+            let center = framebuffer.size().map(|x| x as f32) / 2.0;
+            self.geng.draw2d().draw2d(
+                framebuffer,
+                &geng::PixelPerfectCamera,
+                &draw2d::Segment::new(
+                    Segment(center - vec2(radius, 0.0), center + vec2(radius, 0.0)),
+                    5.0,
+                    Rgba::new(0.0, 0.0, 0.0, 0.5),
+                ),
+            );
+            self.geng.draw2d().draw2d(
+                framebuffer,
+                &geng::PixelPerfectCamera,
+                &draw2d::Segment::new(
+                    Segment(center - vec2(0.0, radius), center + vec2(0.0, radius)),
+                    5.0,
+                    Rgba::new(0.0, 0.0, 0.0, 0.5),
+                ),
+            );
+        }
     }
 
     fn fixed_update(&mut self, delta_time: f64) {
-        let delta_time = delta_time as f32;
-        if self.my_guy.is_none()
-            || !self
-                .guys
-                .get(&self.my_guy.unwrap())
-                .unwrap()
-                .progress
-                .finished
-        {
-            self.simulation_time += delta_time;
-        }
-        for time in self.remote_simulation_times.values_mut() {
-            *time += delta_time;
+        let delta_time = delta_time as f32 * self.time_scale;
+        if let Some(me) = self.my_guy.and_then(|id| self.guys.get(&id)) {
+            if !me.progress.finished && !me.paused {
+                self.simulation_time += delta_time;
+            }
         }
         self.update_my_guy_input();
         self.update_guys(delta_time);
         self.update_farticles(delta_time);
+        self.update_remote(delta_time);
+        self.update_replays(delta_time);
     }
 
     fn update(&mut self, delta_time: f64) {
+        let delta_time = delta_time as f32;
+
+        self.next_save -= delta_time;
+        if self.next_save < 0.0 {
+            self.next_save = 1.0;
+            if let Some(me) = self.my_guy.and_then(|id| self.guys.get(&id)) {
+                preferences::save("save", &me.state);
+                preferences::save("simulation_time", &self.simulation_time);
+            }
+        }
+
         // self.volume = self.assets.config.volume;
         if self.geng.window().is_key_pressed(geng::Key::PageUp) {
-            self.volume += delta_time as f32 * 0.5;
+            self.volume += delta_time * 0.5;
         }
         if self.geng.window().is_key_pressed(geng::Key::PageDown) {
-            self.volume -= delta_time as f32 * 0.5;
+            self.volume -= delta_time * 0.5;
         }
         self.volume = self.volume.clamp(0.0, 1.0);
         if self.mute_music {
@@ -337,20 +442,21 @@ impl geng::State for Game {
         } else {
             self.music.set_volume(self.volume as f64);
         }
+
         self.emotes.retain(|&(t, ..)| t >= self.real_time - 1.0);
-        let delta_time = delta_time as f32;
+
         self.real_time += delta_time;
 
         let mut target_center = self.camera.center;
         if let Some(id) = self.my_guy {
             let guy = self.guys.get(&id).unwrap();
-            target_center = guy.ball.pos;
+            target_center = guy.state.pos;
             if self.show_customizer {
                 target_center.x += 1.0;
             }
         } else if let Some(id) = self.follow {
             if let Some(guy) = self.guys.get(&id) {
-                target_center = guy.ball.pos;
+                target_center = guy.state.pos;
             }
         }
         self.camera.center += (target_center - self.camera.center) * (delta_time * 5.0).min(1.0);
@@ -365,19 +471,42 @@ impl geng::State for Game {
         }
 
         self.handle_connection();
-        self.update_remote();
 
         if let Some(id) = self.my_guy {
             let guy = self.guys.get_mut(&id).unwrap();
             guy.customization.name = self.customization.name.clone();
             guy.customization.colors = self.customization.colors.clone();
         }
+
+        self.next_golden_glint -= delta_time;
+        if self.next_golden_glint < 0.0 {
+            let fart_type = "glint".to_owned();
+            let assets = self.assets.get();
+            let fart_assets = &assets.farts[&fart_type];
+            self.next_golden_glint = 1.0 / fart_assets.config.farticle_count as f32;
+            self.farticles.entry(fart_type).or_default().push(Farticle {
+                size: fart_assets.config.farticle_size,
+                pos: thread_rng().gen_circle(self.level.finish_point, 1.0),
+                vel: thread_rng()
+                    .gen_circle(vec2::ZERO, fart_assets.config.farticle_additional_vel),
+                rot: thread_rng().gen_range(0.0..2.0 * f32::PI),
+                w: thread_rng()
+                    .gen_range(-fart_assets.config.farticle_w..=fart_assets.config.farticle_w),
+                colors: fart_assets.config.colors.get(),
+                t: 1.0,
+            });
+        }
+
+        self.update_video_editor(delta_time);
     }
 
     fn handle_event(&mut self, event: geng::Event) {
         self.handle_event_editor(&event);
         self.handle_customizer_event(&event);
         match event {
+            geng::Event::Gamepad(event) => {
+                self.active_gamepad = Some(event.id);
+            }
             geng::Event::MouseMove { position, .. }
                 if self
                     .geng
@@ -402,9 +531,9 @@ impl geng::State for Game {
                 if let Some(guy) = self
                     .guys
                     .iter()
-                    .min_by_key(|guy| r32((guy.ball.pos - pos).len()))
+                    .min_by_key(|guy| r32((guy.state.pos - pos).len()))
                 {
-                    if (guy.ball.pos - pos).len() < guy.radius() {
+                    if (guy.state.pos - pos).len() < guy.radius() {
                         self.follow = Some(guy.id);
                     }
                 }
@@ -468,17 +597,52 @@ impl geng::State for Game {
                 }
             }
             geng::Event::KeyDown { key: geng::Key::I } => {
-                self.camera.fov = self.assets.config.camera_fov;
+                self.camera.fov = self.assets.get().config.camera_fov;
+            }
+            geng::Event::KeyDown { key: geng::Key::F5 } if self.opt.editor => {
+                self.quicksave = self.my_guy.and_then(|id| self.guys.get(&id)).cloned();
+            }
+            geng::Event::KeyDown { key: geng::Key::F7 } if self.opt.editor => {
+                if let Some(save) = &self.quicksave {
+                    let save = save.clone();
+                    self.respawn_my_guy();
+                    *self.guys.get_mut(&self.my_guy.unwrap()).unwrap() = save;
+                }
+            }
+            geng::Event::KeyDown { key: geng::Key::Z } if self.opt.editor => {
+                self.time_scale = 1.0;
+            }
+            geng::Event::KeyDown { key: geng::Key::X } if self.opt.editor => {
+                self.time_scale = 0.5;
+            }
+            geng::Event::KeyDown { key: geng::Key::C } if self.opt.editor => {
+                self.time_scale = 0.25;
+            }
+            geng::Event::KeyDown { key: geng::Key::Q } if self.opt.editor => {
+                if self.geng.window().is_key_pressed(geng::Key::LCtrl) {
+                    if let Some(mut recording) = self.recording.take() {
+                        if let Some(guy) = self.my_guy.and_then(|id| self.guys.get(&id)) {
+                            recording.push(self.simulation_time, guy);
+                        }
+                        self.replays.push(recording);
+                        self.save_replays();
+                    } else if let Some(guy) = self.my_guy.and_then(|id| self.guys.get(&id)) {
+                        self.recording = Some(Replay::new(self.simulation_time, guy));
+                    }
+                }
             }
             _ => {}
         }
-        self.prev_mouse_pos = self.geng.window().mouse_pos();
+        self.prev_mouse_pos = self.geng.window().cursor_position();
     }
     fn ui<'a>(&'a mut self, cx: &'a geng::ui::Controller) -> Box<dyn geng::ui::Widget + 'a> {
+        use geng::ui::*;
+        let mut result = geng::ui::Void.boxed();
         if self.editor.is_some() {
-            self.editor_ui(cx)
-        } else {
-            Box::new(geng::ui::Void)
+            result = stack![result, self.editor_ui(cx)].boxed();
+        } else if self.video_editor.is_some() {
+            result = stack![result, self.video_editor_ui(cx)].boxed();
         }
+        result
     }
 }

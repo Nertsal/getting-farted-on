@@ -1,33 +1,50 @@
 use super::*;
 
 impl Game {
-    pub fn update_remote(&mut self) {
-        for (&id, updates) in &mut self.remote_updates {
-            let current_simulation_time = match self.remote_simulation_times.get(&id) {
-                Some(x) => *x,
-                None => continue,
-            };
-            if let Some(update) = updates.back() {
-                if (update.0 - current_simulation_time).abs() > 5.0 {
-                    updates.clear();
-                    self.remote_simulation_times.remove(&id);
-                    self.guys.remove(&id);
-                    continue;
+    fn update_replay(id: Id, replay: &mut Replay, delta_time: f32, guys: &mut Collection<Guy>) {
+        if let Some((input, snapshot)) = replay.update(delta_time) {
+            match guys.get_mut(&id) {
+                Some(guy) => {
+                    guy.input = input;
+                    guy.state = snapshot;
+                    guy.customization = replay.customization().clone();
+                }
+                None => {
+                    let guy = Guy {
+                        id,
+                        customization: replay.customization().clone(),
+                        input,
+                        state: snapshot,
+                        animation: default(),
+                        progress: default(),
+                        paused: false,
+                    };
+                    guys.insert(guy);
                 }
             }
-            while let Some(update) = updates.front() {
-                if (update.0 - current_simulation_time).abs() > 5.0 {
-                    updates.clear();
-                    self.remote_simulation_times.remove(&id);
-                    self.guys.remove(&id);
-                    break;
-                }
-                if update.0 <= current_simulation_time {
-                    let update = updates.pop_front().unwrap().1;
-                    self.guys.insert(update);
-                } else {
-                    break;
-                }
+        }
+    }
+    pub fn update_remote(&mut self, delta_time: f32) {
+        let mut to_remove = Vec::new();
+        for (&id, replay) in &mut self.remote_updates {
+            Self::update_replay(id, replay, delta_time, &mut self.guys);
+            // TODO speedup replay instead?
+            if replay.time_left() > 5.0 {
+                to_remove.push(id);
+            }
+            replay.trim_beginning();
+        }
+        for id in to_remove {
+            self.guys.remove(&id);
+            self.remote_updates.remove(&id);
+        }
+    }
+
+    pub fn update_replays(&mut self, delta_time: f32) {
+        for (i, replay) in self.replays.iter_mut().enumerate() {
+            Self::update_replay(Id::replay(i), replay, delta_time, &mut self.guys);
+            if replay.time_left() < 0.0 {
+                replay.reset();
             }
         }
     }

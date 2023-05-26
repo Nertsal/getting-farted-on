@@ -6,17 +6,17 @@ pub struct ObjectToolConfig {
 }
 
 impl EditorToolConfig for ObjectToolConfig {
-    fn default(assets: &Assets) -> Self {
+    fn default(assets: &AssetsHandle) -> Self {
         Self {
-            snap_distance: assets.config.snap_distance,
-            selected_type: assets.objects.keys().min().unwrap().clone(),
+            snap_distance: assets.get().config.snap_distance,
+            selected_type: assets.get().objects.keys().min().unwrap().to_owned(),
         }
     }
 }
 
 pub struct ObjectTool {
     geng: Geng,
-    assets: Rc<Assets>,
+    assets: AssetsHandle,
     config: ObjectToolConfig,
 }
 impl ObjectTool {
@@ -40,7 +40,7 @@ impl ObjectTool {
 
 impl EditorTool for ObjectTool {
     type Config = ObjectToolConfig;
-    fn new(geng: &Geng, assets: &Rc<Assets>, config: ObjectToolConfig) -> Self {
+    fn new(geng: &Geng, assets: &AssetsHandle, config: ObjectToolConfig) -> Self {
         Self {
             geng: geng.clone(),
             assets: assets.clone(),
@@ -57,10 +57,10 @@ impl EditorTool for ObjectTool {
     ) {
         if let Some(index) = self.find_hovered_object(cursor, level, selected_layer) {
             let object = &level.layers[selected_layer].objects[index];
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 camera,
-                &draw_2d::Quad::new(
+                &draw2d::Quad::new(
                     Aabb2::point(object.pos).extend_uniform(0.5),
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
                 ),
@@ -99,7 +99,8 @@ impl EditorTool for ObjectTool {
     fn ui<'a>(&'a mut self, cx: &'a geng::ui::Controller) -> Box<dyn geng::ui::Widget + 'a> {
         use geng::ui::*;
 
-        let mut options: Vec<&String> = self.assets.objects.keys().collect();
+        let assets = self.assets.get();
+        let mut options: Vec<&str> = assets.objects.keys().collect();
         options.sort();
         let options = column(
             options
@@ -107,7 +108,7 @@ impl EditorTool for ObjectTool {
                 .map(|name| {
                     let button = Button::new(cx, name);
                     if button.was_clicked() {
-                        self.config.selected_type = name.clone();
+                        self.config.selected_type = name.to_owned();
                     }
                     let mut widget: Box<dyn Widget> =
                         Box::new(button.uniform_padding(8.0).align(vec2(0.0, 0.0)));

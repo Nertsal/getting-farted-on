@@ -9,7 +9,7 @@ struct ClientState {
 }
 
 struct ServerState {
-    next_client_id: Id,
+    id_gen: IdGen,
     messages: Vec<ServerMessage>,
     clients: HashMap<Id, ClientState>,
 }
@@ -36,6 +36,7 @@ impl ServerState {
 
 struct Client {
     client_id: Id,
+    history: Option<History>,
     server_state: Arc<Mutex<ServerState>>,
 }
 
@@ -47,7 +48,17 @@ impl net::Receiver<ClientMessage> for Client {
         match message {
             ClientMessage::ForceReset => state.messages.push(ServerMessage::ForceReset),
             ClientMessage::Ping => client.sender.send(ServerMessage::Pong),
-            ClientMessage::Update(t, guy) => state.messages.push(ServerMessage::UpdateGuy(t, guy)),
+            ClientMessage::Update(t, guy) => {
+                match self.history.as_mut() {
+                    None => {
+                        self.history = Some(History::new(t, &guy));
+                    }
+                    Some(history) => {
+                        history.push(t, &guy);
+                    }
+                }
+                state.messages.push(ServerMessage::UpdateGuy(t, guy));
+            }
             ClientMessage::Despawn => state.messages.push(ServerMessage::Despawn(self.client_id)),
             ClientMessage::Emote(emote) => state
                 .messages
@@ -63,6 +74,22 @@ impl Drop for Client {
         let state: &mut ServerState = &mut state;
         state.messages.push(ServerMessage::Despawn(self.client_id));
         state.clients.remove(&self.client_id);
+
+        if let Some(history) = self.history.take() {
+            let replays_folder = run_dir().join("server_replays");
+            std::fs::create_dir_all(&replays_folder).unwrap();
+            history
+                .save(replays_folder.join(format!(
+                    "{}_{}",
+                    history.customization().name,
+                    rand::distributions::DistString::sample_string(
+                        &rand::distributions::Alphanumeric,
+                        &mut thread_rng(),
+                        16,
+                    )
+                )))
+                .unwrap();
+        }
     }
 }
 
@@ -79,7 +106,7 @@ impl Server {
     pub fn new<A: std::net::ToSocketAddrs + Debug + Copy>(addr: A) -> Self {
         let state = Arc::new(Mutex::new(ServerState {
             messages: Vec::new(),
-            next_client_id: 0,
+            id_gen: IdGen::new(),
             clients: HashMap::new(),
         }));
         Self {
@@ -129,13 +156,13 @@ impl net::server::App for ServerApp {
     fn connect(&mut self, mut sender: Box<dyn net::Sender<ServerMessage>>) -> Client {
         let mut state = self.state.lock().unwrap();
         let state: &mut ServerState = &mut state;
-        let client_id = state.next_client_id;
+        let client_id = state.id_gen.gen();
         sender.send(ServerMessage::ClientId(client_id));
         state.clients.insert(client_id, ClientState { sender });
-        state.next_client_id += 1;
         Client {
             client_id,
             server_state: self.state.clone(),
+            history: None,
         }
     }
 }

@@ -21,7 +21,7 @@ pub struct EditorState {
 }
 
 impl EditorState {
-    pub fn new(geng: &Geng, assets: &Rc<Assets>) -> Self {
+    pub fn new(geng: &Geng, assets: &AssetsHandle) -> Self {
         let available_tools = vec![
             tool_constructor::<EditTool>(geng, assets),
             tool_constructor::<SurfaceTool>(geng, assets),
@@ -71,7 +71,7 @@ impl Game {
             level,
             camera.screen_to_world(
                 self.framebuffer_size,
-                self.geng.window().mouse_pos().map(|x| x as f32),
+                self.geng.window().cursor_position().map(|x| x as f32),
             ),
         )
     }
@@ -101,10 +101,10 @@ impl Game {
                 &camera,
                 framebuffer,
             );
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 &camera,
-                &draw_2d::Quad::new(
+                &draw2d::Quad::new(
                     Aabb2::point(self.snapped_cursor_position(&self.level)).extend_uniform(0.1),
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
                 ),
@@ -119,10 +119,10 @@ impl Game {
         let cursor_pos = self.snapped_cursor_position(&self.level);
         let editor = self.editor.as_mut().unwrap();
         editor.cursor = Cursor {
-            screen_pos: self.geng.window().mouse_pos().map(|x| x as f32),
+            screen_pos: self.geng.window().cursor_position().map(|x| x as f32),
             world_pos: self.camera.screen_to_world(
                 self.framebuffer_size,
-                self.geng.window().mouse_pos().map(|x| x as f32),
+                self.geng.window().cursor_position().map(|x| x as f32),
             ),
             snapped_world_pos: cursor_pos,
         };
@@ -140,6 +140,11 @@ impl Game {
                     editor.selected_tool_index =
                         (editor.selected_tool_index + 1) % editor.available_tools.len();
                     editor.tool = editor.available_tools[editor.selected_tool_index].create();
+                }
+                geng::Key::T => {
+                    if let Some(guy) = self.my_guy.and_then(|id| self.guys.get_mut(&id)) {
+                        guy.state.pos = editor.cursor.world_pos;
+                    }
                 }
                 geng::Key::Q => {
                     if !self.geng.window().is_key_pressed(geng::Key::LCtrl) {

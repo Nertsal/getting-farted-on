@@ -3,11 +3,26 @@ name = "getting-farted-on"
 version = "0.1.0"
 edition = "2021"
 
+# Enable a small amount of optimization in debug mode
+[profile.dev]
+opt-level = 1
+
+# Enable high optimizations for dependencies (incl. Bevy)
+[profile.dev.package."*"]
+opt-level = 3
+
 [dependencies]
 geng = { git = "https://github.com/nertsal/geng", branch = "tas" }
 geng_tas = { git = "https://github.com/nertsal/geng-tas" }
+dynamic-linking = { path = "dynamic-linking", optional = true }
+# geng.git = "https://github.com/nertsal/geng"
 serde = "1"
 noise = "0.8.2"
+resvg = "0.29"
+image = "0.24"
+bytemuck = "1"
+rctree = "0.5"
+roxmltree = "0.18"
 
 [build-dependencies]
 cmake = "<=0.1.45" # https://github.com/PistonDevelopers/freetype-sys/issues/99

@@ -1,2 +1,10 @@
+/.direnv/
 /target
 /Cargo.lock
+
+/dist/
+
+/server_replays/
+
+# I like having this as git worktree
+/gh-pages/

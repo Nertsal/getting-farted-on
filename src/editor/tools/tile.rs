@@ -6,17 +6,17 @@ pub struct TileToolConfig {
 }
 
 impl EditorToolConfig for TileToolConfig {
-    fn default(assets: &Assets) -> Self {
+    fn default(assets: &AssetsHandle) -> Self {
         Self {
-            snap_distance: assets.config.snap_distance,
-            selected_type: assets.tiles.keys().min().unwrap().clone(),
+            snap_distance: assets.get().config.snap_distance,
+            selected_type: assets.get().tiles.keys().min().unwrap().to_owned(),
         }
     }
 }
 
 pub struct TileTool {
     geng: Geng,
-    assets: Rc<Assets>,
+    assets: AssetsHandle,
     points: Vec<vec2<f32>>,
     wind_drag: Option<(usize, vec2<f32>)>,
     saved_flow: vec2<f32>,
@@ -46,7 +46,7 @@ impl TileTool {
 
 impl EditorTool for TileTool {
     type Config = TileToolConfig;
-    fn new(geng: &Geng, assets: &Rc<Assets>, config: Self::Config) -> Self {
+    fn new(geng: &Geng, assets: &AssetsHandle, config: Self::Config) -> Self {
         Self {
             geng: geng.clone(),
             assets: assets.clone(),
@@ -67,16 +67,16 @@ impl EditorTool for TileTool {
         if self.points.is_empty() {
             if let Some(index) = self.find_hovered_tile(cursor, level, selected_layer) {
                 let tile = &level.layers[selected_layer].tiles[index];
-                self.geng.draw_2d(
+                self.geng.draw2d().draw2d(
                     framebuffer,
                     camera,
-                    &draw_2d::Polygon::new(tile.vertices.into(), Rgba::new(0.0, 0.0, 1.0, 0.5)),
+                    &draw2d::Polygon::new(tile.vertices.into(), Rgba::new(0.0, 0.0, 1.0, 0.5)),
                 );
                 if self.wind_drag.is_none() {
-                    self.geng.draw_2d(
+                    self.geng.draw2d().draw2d(
                         framebuffer,
                         camera,
-                        &draw_2d::Segment::new(
+                        &draw2d::Segment::new(
                             Segment(cursor.world_pos, cursor.world_pos + tile.flow),
                             0.2,
                             Rgba::new(1.0, 0.0, 0.0, 0.5),
@@ -86,10 +86,10 @@ impl EditorTool for TileTool {
             }
         } else {
             for &p in &self.points {
-                self.geng.draw_2d(
+                self.geng.draw2d().draw2d(
                     framebuffer,
                     camera,
-                    &draw_2d::Quad::new(
+                    &draw2d::Quad::new(
                         Aabb2::point(p).extend_uniform(0.1),
                         Rgba::new(0.0, 1.0, 0.0, 0.5),
                     ),
@@ -97,10 +97,10 @@ impl EditorTool for TileTool {
             }
             match *self.points {
                 [p1] => {
-                    self.geng.draw_2d(
+                    self.geng.draw2d().draw2d(
                         framebuffer,
                         camera,
-                        &draw_2d::Segment::new(
+                        &draw2d::Segment::new(
                             Segment(p1, cursor.snapped_world_pos),
                             0.1,
                             Rgba::new(1.0, 1.0, 1.0, 0.5),
@@ -108,10 +108,10 @@ impl EditorTool for TileTool {
                     );
                 }
                 [p1, p2] => {
-                    self.geng.draw_2d(
+                    self.geng.draw2d().draw2d(
                         framebuffer,
                         camera,
-                        &draw_2d::Polygon::new(
+                        &draw2d::Polygon::new(
                             vec![p1, p2, cursor.snapped_world_pos],
                             Rgba::new(1.0, 1.0, 1.0, 0.5),
                         ),
@@ -121,10 +121,10 @@ impl EditorTool for TileTool {
             }
         }
         if let Some((_, start)) = self.wind_drag {
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 camera,
-                &draw_2d::Segment::new(
+                &draw2d::Segment::new(
                     Segment(start, cursor.world_pos),
                     0.2,
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
@@ -192,13 +192,14 @@ impl EditorTool for TileTool {
                 }
             }
             geng::Event::KeyDown { key: geng::Key::X } => {
-                let mut options: Vec<&String> = self.assets.tiles.keys().collect();
+                let assets = self.assets.get();
+                let mut options: Vec<&str> = assets.tiles.keys().collect();
                 options.sort();
                 let idx = options
                     .iter()
                     .position(|&s| s == &self.config.selected_type)
                     .unwrap_or(0);
-                self.config.selected_type = options[(idx + 1) % options.len()].clone();
+                self.config.selected_type = options[(idx + 1) % options.len()].to_owned();
             }
 
             geng::Event::KeyDown { key: geng::Key::W } => {
@@ -232,7 +233,8 @@ impl EditorTool for TileTool {
     fn ui<'a>(&'a mut self, cx: &'a geng::ui::Controller) -> Box<dyn geng::ui::Widget + 'a> {
         use geng::ui::*;
 
-        let mut options: Vec<&String> = self.assets.tiles.keys().collect();
+        let assets = self.assets.get();
+        let mut options: Vec<&str> = assets.tiles.keys().collect();
         options.sort();
         let options = column(
             options
@@ -240,7 +242,7 @@ impl EditorTool for TileTool {
                 .map(|name| {
                     let button = Button::new(cx, name);
                     if button.was_clicked() {
-                        self.config.selected_type = name.clone();
+                        self.config.selected_type = name.to_owned();
                     }
                     let mut widget: Box<dyn Widget> =
                         Box::new(button.uniform_padding(8.0).align(vec2(0.0, 0.0)));

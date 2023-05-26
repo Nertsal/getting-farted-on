@@ -26,14 +26,14 @@ impl<T> Button<T> {
 
 pub struct Controller {
     geng: Geng,
-    assets: Rc<Assets>,
+    assets: AssetsHandle,
     mouse: vec2<f32>,
     camera: geng::Camera2d,
     framebuffer_size: vec2<f32>,
 }
 
 impl Controller {
-    pub fn new(geng: &Geng, assets: &Rc<Assets>) -> Self {
+    pub fn new(geng: &Geng, assets: &AssetsHandle) -> Self {
         Self {
             geng: geng.clone(),
             assets: assets.clone(),
@@ -65,13 +65,12 @@ impl Controller {
             {
                 position.y -= button.size * 0.2;
             }
-            self.assets.font.draw(
+            self.assets.get().font.draw(
                 framebuffer,
                 &self.camera,
                 &button.text,
-                position,
-                geng::TextAlign::LEFT,
-                button.size,
+                vec2::splat(geng::TextAlign::LEFT),
+                mat3::translate(position) * mat3::scale_uniform(button.size),
                 if hovered {
                     Rgba::new(0.5, 0.5, 1.0, 1.0)
                 } else {
@@ -93,14 +92,12 @@ impl Controller {
                     .camera
                     .screen_to_world(self.framebuffer_size, position.map(|x| x as f32));
             }
-            geng::Event::TouchStart { ref touches, .. }
-            | geng::Event::TouchMove { ref touches, .. }
-            | geng::Event::TouchEnd { ref touches, .. } => {
-                if let Some(touch) = touches.get(0) {
-                    self.mouse = self
-                        .camera
-                        .screen_to_world(self.framebuffer_size, touch.position.map(|x| x as f32));
-                }
+            geng::Event::TouchStart(touch)
+            | geng::Event::TouchMove(touch)
+            | geng::Event::TouchEnd(touch) => {
+                self.mouse = self
+                    .camera
+                    .screen_to_world(self.framebuffer_size, touch.position.map(|x| x as f32));
             }
             _ => {}
         }

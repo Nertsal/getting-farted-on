@@ -5,16 +5,16 @@ pub struct PortalToolConfig {
 }
 
 impl EditorToolConfig for PortalToolConfig {
-    fn default(assets: &Assets) -> Self {
+    fn default(assets: &AssetsHandle) -> Self {
         Self {
-            snap_distance: assets.config.snap_distance,
+            snap_distance: assets.get().config.snap_distance,
         }
     }
 }
 
 pub struct PortalTool {
     geng: Geng,
-    assets: Rc<Assets>,
+    assets: AssetsHandle,
     start_drag: Option<usize>,
     config: PortalToolConfig,
 }
@@ -34,7 +34,7 @@ impl PortalTool {
 
 impl EditorTool for PortalTool {
     type Config = PortalToolConfig;
-    fn new(geng: &Geng, assets: &Rc<Assets>, config: PortalToolConfig) -> Self {
+    fn new(geng: &Geng, assets: &AssetsHandle, config: PortalToolConfig) -> Self {
         Self {
             geng: geng.clone(),
             assets: assets.clone(),
@@ -51,10 +51,10 @@ impl EditorTool for PortalTool {
         framebuffer: &mut ugli::Framebuffer,
     ) {
         if let Some(start) = self.start_drag {
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 camera,
-                &draw_2d::Segment::new(
+                &draw2d::Segment::new(
                     Segment(level.portals[start].pos, cursor.world_pos),
                     0.2,
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
@@ -62,10 +62,10 @@ impl EditorTool for PortalTool {
             );
         } else if let Some(index) = self.find_hovered_portal(cursor, level) {
             let portal = &level.portals[index];
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 camera,
-                &draw_2d::Quad::new(
+                &draw2d::Quad::new(
                     Aabb2::point(portal.pos).extend_uniform(0.5),
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
                 ),

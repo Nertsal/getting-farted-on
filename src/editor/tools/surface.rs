@@ -6,17 +6,17 @@ pub struct SurfaceToolConfig {
 }
 
 impl EditorToolConfig for SurfaceToolConfig {
-    fn default(assets: &Assets) -> Self {
+    fn default(assets: &AssetsHandle) -> Self {
         Self {
-            snap_distance: assets.config.snap_distance,
-            selected_type: assets.surfaces.keys().min().unwrap().clone(),
+            snap_distance: assets.get().config.snap_distance,
+            selected_type: assets.get().surfaces.keys().min().unwrap().to_owned(),
         }
     }
 }
 
 pub struct SurfaceTool {
     geng: Geng,
-    assets: Rc<Assets>,
+    assets: AssetsHandle,
     start_drag: Option<vec2<f32>>,
     wind_drag: Option<(usize, vec2<f32>)>,
     saved_flow: f32,
@@ -57,7 +57,7 @@ impl SurfaceTool {
 
 impl EditorTool for SurfaceTool {
     type Config = SurfaceToolConfig;
-    fn new(geng: &Geng, assets: &Rc<Assets>, config: SurfaceToolConfig) -> Self {
+    fn new(geng: &Geng, assets: &AssetsHandle, config: SurfaceToolConfig) -> Self {
         Self {
             geng: geng.clone(),
             assets: assets.clone(),
@@ -76,27 +76,27 @@ impl EditorTool for SurfaceTool {
         framebuffer: &mut ugli::Framebuffer,
     ) {
         if let Some(Segment(p1, p2)) = self.drag(cursor) {
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 camera,
-                &draw_2d::Segment::new(Segment(p1, p2), 0.1, Rgba::new(1.0, 1.0, 1.0, 0.5)),
+                &draw2d::Segment::new(Segment(p1, p2), 0.1, Rgba::new(1.0, 1.0, 1.0, 0.5)),
             );
         } else if let Some(index) = self.find_hovered_surface(cursor, level, selected_layer) {
             let surface = &level.layers[selected_layer].surfaces[index];
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 camera,
-                &draw_2d::Segment::new(
+                &draw2d::Segment::new(
                     Segment(surface.p1, surface.p2),
                     0.2,
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
                 ),
             );
             if self.wind_drag.is_none() {
-                self.geng.draw_2d(
+                self.geng.draw2d().draw2d(
                     framebuffer,
                     camera,
-                    &draw_2d::Segment::new(
+                    &draw2d::Segment::new(
                         Segment(
                             cursor.world_pos,
                             cursor.world_pos
@@ -109,10 +109,10 @@ impl EditorTool for SurfaceTool {
             }
         }
         if let Some((_, start)) = self.wind_drag {
-            self.geng.draw_2d(
+            self.geng.draw2d().draw2d(
                 framebuffer,
                 camera,
-                &draw_2d::Segment::new(
+                &draw2d::Segment::new(
                     Segment(start, cursor.world_pos),
                     0.2,
                     Rgba::new(1.0, 0.0, 0.0, 0.5),
@@ -199,7 +199,8 @@ impl EditorTool for SurfaceTool {
     fn ui<'a>(&'a mut self, cx: &'a geng::ui::Controller) -> Box<dyn geng::ui::Widget + 'a> {
         use geng::ui::*;
 
-        let mut options: Vec<&String> = self.assets.surfaces.keys().collect();
+        let assets = self.assets.get();
+        let mut options: Vec<&str> = assets.surfaces.keys().collect();
         options.sort();
         let options = column(
             options
@@ -207,7 +208,7 @@ impl EditorTool for SurfaceTool {
                 .map(|name| {
                     let button = Button::new(cx, name);
                     if button.was_clicked() {
-                        self.config.selected_type = name.clone();
+                        self.config.selected_type = name.to_owned();
                     }
                     let mut widget: Box<dyn Widget> =
                         Box::new(button.uniform_padding(8.0).align(vec2(0.0, 0.0)));
