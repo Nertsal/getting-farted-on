@@ -95,8 +95,9 @@ impl geng_tas::Tasable for Game {
             Some(mut guy) => {
                 if let Some(id) = self.my_guy {
                     guy.id = id;
-                    self.guys.insert(guy);
                 }
+                self.my_guy = Some(guy.id);
+                self.guys.insert(guy);
             }
             None => {
                 if let Some(id) = &self.my_guy {

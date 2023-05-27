@@ -134,7 +134,8 @@ fn main() {
             .await;
             let assets = assets.expect("Failed to load assets");
             let assets = Rc::new(assets);
-            let game = Game::new(&geng, &assets, level, opt, connection_info);
+            let mut game = Game::new(&geng, &assets, level, opt, connection_info);
+            game.respawn_my_guy();
             geng_tas::Tas::new(game, &geng)
         });
 
